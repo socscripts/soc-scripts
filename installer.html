@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SOC Scripts - Install Hub</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 650px;
+            width: 100%;
+            padding: 50px 40px;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 45px;
+        }
+        
+        .logo-container {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 20px;
+            height: 100px;
+        }
+        
+        .logo-image {
+            height: 100%;
+            width: auto;
+            animation: logoFloat 3s ease-in-out infinite;
+        }
+        
+        @keyframes logoFloat {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-8px); }
+        }
+        
+        .header h1 {
+            font-size: 32px;
+            color: #1e3c72;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        
+        .header p {
+            color: #666;
+            font-size: 15px;
+            line-height: 1.6;
+        }
+        
+        .scripts-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 16px;
+            margin-bottom: 30px;
+        }
+        
+        .script-card {
+            border: 2px solid #e8e8e8;
+            border-radius: 12px;
+            padding: 24px;
+            transition: all 0.3s ease;
+            background: #fafbfc;
+        }
+        
+        .script-card:hover {
+            border-color: #2a5298;
+            box-shadow: 0 8px 24px rgba(42, 82, 152, 0.12);
+            background: #ffffff;
+            transform: translateY(-2px);
+        }
+        
+        .script-icon {
+            display: inline-block;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #2a5298 0%, #22b573 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 16px;
+            margin-bottom: 12px;
+        }
+        
+        .script-card h3 {
+            font-size: 17px;
+            color: #1e3c72;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        
+        .script-card p {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 18px;
+            line-height: 1.5;
+        }
+        
+        .install-btn {
+            display: inline-block;
+            padding: 11px 28px;
+            background: linear-gradient(135deg, #2a5298 0%, #22b573 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(42, 82, 152, 0.2);
+        }
+        
+        .install-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(42, 82, 152, 0.3);
+        }
+        
+        .install-btn:active {
+            transform: translateY(0);
+        }
+        
+        .info-box {
+            background: linear-gradient(135deg, #e3f2fd 0%, #e8f5e9 100%);
+            border-left: 4px solid #2a5298;
+            padding: 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            color: #1e3c72;
+            line-height: 1.6;
+        }
+        
+        .info-box strong {
+            display: block;
+            margin-bottom: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo-container">
+                <img src="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Vth3mlbl_400x400.jpg" alt="EyeQ Logo" class="logo-image" style="max-height: 100px; width: auto;">
+            </div>
+            <h1>SOC Scripts</h1>
+            <p>Professional security tools for your workflow<br>Click any button below to install</p>
+        </div>
+
+        <div class="scripts-grid">
+            <div class="script-card">
+                <div class="script-icon">🔍</div>
+                <h3>Auto Details</h3>
+                <p>Automatically opens site details when site is open</p>
+                <a class="install-btn" href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Auto_Details 1.txt">Install</a>
+            </div>
+
+            <div class="script-card">
+                <div class="script-icon">⚠️</div>
+                <h3>Quick Audit</h3>
+                <p>Quiclly Audits events</p>
+                <a class="install-btn" href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Quick_Audit_v4.user.js">Install</a>
+            </div>
+
+            <div class="script-card">
+                <div class="script-icon">❤️‍🔥</div>
+                <h3>Hotkeys</h3>
+                <p>A numpad hotkey editor</p>
+                <a class="install-btn" href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/EyeQ_Numpad_HK_v106.user.js">Install</a>
+            </div>
+
+            <div class="script-card">
+                <div class="script-icon">🏃🏽‍➡️</div>
+                <h3>Auto Process</h3>
+                <p>Automatically picks up alarms from the queue</p>
+                <a class="install-btn" href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/tampermonkey-backup-chrome-2023-11-25T02-44-02-990Z (1) (1) 36.txt">Install</a>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <strong>How to install:</strong>
+            Click any "Install" button above. Tampermonkey will prompt you to review and confirm. Your scripts are ready to use immediately.
+        </div>
+    </div>
+</body>
+</html>
