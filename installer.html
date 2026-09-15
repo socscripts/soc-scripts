@@ -1,6 +1,9 @@
+
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>SOC Scripts - Install Hub</title>
     <style>
         * {
@@ -8,7 +11,7 @@
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
@@ -18,7 +21,7 @@
             justify-content: center;
             padding: 20px;
         }
-        
+
         .container {
             background: white;
             border-radius: 16px;
@@ -27,50 +30,50 @@
             width: 100%;
             padding: 50px 40px;
         }
-        
+
         .header {
             text-align: center;
             margin-bottom: 45px;
         }
-        
+
         .logo-container {
             display: flex;
             justify-content: center;
             margin-bottom: 20px;
             height: 100px;
         }
-        
+
         .logo-image {
             height: 100%;
             width: auto;
             animation: logoFloat 3s ease-in-out infinite;
         }
-        
+
         @keyframes logoFloat {
             0%, 100% { transform: translateY(0px); }
             50% { transform: translateY(-8px); }
         }
-        
+
         .header h1 {
             font-size: 32px;
             color: #1e3c72;
             margin-bottom: 8px;
             font-weight: 600;
         }
-        
+
         .header p {
             color: #666;
             font-size: 15px;
             line-height: 1.6;
         }
-        
+
         .scripts-grid {
             display: grid;
             grid-template-columns: 1fr;
             gap: 16px;
-            margin-bottom: 30px;
+            margin-bottom: 24px;
         }
-        
+
         .script-card {
             border: 2px solid #e8e8e8;
             border-radius: 12px;
@@ -78,16 +81,15 @@
             transition: all 0.3s ease;
             background: #fafbfc;
         }
-        
+
         .script-card:hover {
             border-color: #2a5298;
             box-shadow: 0 8px 24px rgba(42, 82, 152, 0.12);
             background: #ffffff;
             transform: translateY(-2px);
         }
-        
+
         .script-icon {
-            display: inline-block;
             width: 32px;
             height: 32px;
             border-radius: 8px;
@@ -99,21 +101,28 @@
             font-size: 16px;
             margin-bottom: 12px;
         }
-        
+
         .script-card h3 {
             font-size: 17px;
             color: #1e3c72;
             margin-bottom: 8px;
             font-weight: 600;
         }
-        
+
         .script-card p {
             font-size: 14px;
             color: #666;
             margin-bottom: 18px;
             line-height: 1.5;
         }
-        
+
+        .actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
         .install-btn {
             display: inline-block;
             padding: 11px 28px;
@@ -128,16 +137,40 @@
             transition: all 0.3s ease;
             box-shadow: 0 4px 12px rgba(42, 82, 152, 0.2);
         }
-        
+
         .install-btn:hover {
             transform: translateY(-2px);
             box-shadow: 0 6px 20px rgba(42, 82, 152, 0.3);
         }
-        
+
         .install-btn:active {
             transform: translateY(0);
         }
-        
+
+        .copy-btn {
+            padding: 10px 16px;
+            background: transparent;
+            color: #2a5298;
+            border: 1px solid #c6d4e8;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s ease, border-color 0.2s ease;
+        }
+
+        .copy-btn:hover {
+            background: #eef3fb;
+            border-color: #2a5298;
+        }
+
+        .install-btn:focus-visible,
+        .copy-btn:focus-visible {
+            outline: 3px solid #1e3c72;
+            outline-offset: 2px;
+        }
+
         .info-box {
             background: linear-gradient(135deg, #e3f2fd 0%, #e8f5e9 100%);
             border-left: 4px solid #2a5298;
@@ -146,11 +179,43 @@
             font-size: 14px;
             color: #1e3c72;
             line-height: 1.6;
+            margin-bottom: 14px;
         }
-        
+
         .info-box strong {
             display: block;
             margin-bottom: 6px;
+        }
+
+        .info-box ol {
+            margin: 6px 0 0 18px;
+        }
+
+        .info-box li {
+            margin-bottom: 4px;
+        }
+
+        .info-box code {
+            background: rgba(30, 60, 114, 0.09);
+            padding: 1px 5px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .troubleshoot {
+            border-left-color: #e0a800;
+            background: linear-gradient(135deg, #fff8e1 0%, #fdf1f1 100%);
+            color: #6b4e00;
+            margin-bottom: 0;
+        }
+
+        .troubleshoot strong { color: #6b4e00; }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation: none !important;
+                transition: none !important;
+            }
         }
     </style>
 </head>
@@ -161,43 +226,102 @@
                 <img src="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Vth3mlbl_400x400.jpg" alt="EyeQ Logo" class="logo-image" style="max-height: 100px; width: auto;">
             </div>
             <h1>SOC Scripts</h1>
-            <p>Professional security tools for your workflow<br>Click any button below to install</p>
+            <p>Security tools for your Immix workflow.<br>Tampermonkey must be installed first.</p>
         </div>
 
         <div class="scripts-grid">
             <div class="script-card">
                 <div class="script-icon">🔍</div>
                 <h3>Auto Details</h3>
-                <p>Automatically opens site details when site is open</p>
-                <a class="install-btn" href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/auto_details_2.user.js">Install</a>
+                <p>Opens the site details panel automatically once an event finishes loading.</p>
+                <div class="actions">
+                    <a class="install-btn"
+                       target="_blank"
+                       rel="noopener"
+                       href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/auto_details_2.user.js">Install</a>
+                    <button class="copy-btn" type="button"
+                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/auto_details_2.user.js">Copy link</button>
+                </div>
             </div>
 
             <div class="script-card">
                 <div class="script-icon">⚠️</div>
                 <h3>Quick Audit</h3>
-                <p>Quiclly Audits events</p>
-                <a class="install-btn" href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Quick_Audit_v4.user.js">Install</a>
+                <p>Speeds up auditing events.</p>
+                <div class="actions">
+                    <a class="install-btn"
+                       target="_blank"
+                       rel="noopener"
+                       href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Quick_Audit_v4.user.js">Install</a>
+                    <button class="copy-btn" type="button"
+                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Quick_Audit_v4.user.js">Copy link</button>
+                </div>
             </div>
 
             <div class="script-card">
                 <div class="script-icon">❤️‍🔥</div>
                 <h3>Hotkeys</h3>
-                <p>A numpad hotkey editor</p>
-                <a class="install-btn" href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/EyeQ_Numpad_HK_v106.user.js">Install</a>
+                <p>Numpad hotkey editor for common actions.</p>
+                <div class="actions">
+                    <a class="install-btn"
+                       target="_blank"
+                       rel="noopener"
+                       href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/EyeQ_Numpad_HK_v106.user.js">Install</a>
+                    <button class="copy-btn" type="button"
+                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/EyeQ_Numpad_HK_v106.user.js">Copy link</button>
+                </div>
             </div>
 
             <div class="script-card">
                 <div class="script-icon">🏃🏽‍➡️</div>
                 <h3>Auto Process</h3>
-                <p>Automatically picks up alarms from the queue</p>
-                <a class="install-btn" href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.js">Install</a>
+                <p>Picks up alarms from the queue automatically.</p>
+                <div class="actions">
+                    <!-- NOTE: rename the file in the repo to immix-customizer.user.js
+                         or this button will open plain text instead of installing. -->
+                    <a class="install-btn"
+                       target="_blank"
+                       rel="noopener"
+                       href="https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.user.js">Install</a>
+                    <button class="copy-btn" type="button"
+                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.user.js">Copy link</button>
+                </div>
             </div>
         </div>
 
         <div class="info-box">
-            <strong>How to install:</strong>
-            Click any "Install" button above. Tampermonkey will prompt you to review and confirm. Your scripts are ready to use immediately.
+            <strong>How to install</strong>
+            Click Install. A new tab opens and Tampermonkey shows its install screen — review it and click Install there. The tab closes itself when the script is added.
+        </div>
+
+        <div class="info-box troubleshoot">
+            <strong>Install button just shows code instead?</strong>
+            Chrome and Edge block extensions from handling script installs unless developer mode is on.
+            <ol>
+                <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>).</li>
+                <li>Turn on <strong>Developer mode</strong>, top right.</li>
+                <li>Reload this page and try again.</li>
+            </ol>
+            Still stuck: click <strong>Copy link</strong>, then in Tampermonkey go to Dashboard &rarr; Utilities &rarr; Install from URL and paste it.
         </div>
     </div>
+
+    <script>
+        document.querySelectorAll('.copy-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var url = btn.dataset.url;
+                var done = function () {
+                    var original = btn.textContent;
+                    btn.textContent = 'Copied';
+                    setTimeout(function () { btn.textContent = original; }, 1500);
+                };
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(url).then(done, function () { window.prompt('Copy this URL:', url); });
+                } else {
+                    window.prompt('Copy this URL:', url);
+                }
+            });
+        });
+    </script>
 </body>
 </html>
