@@ -1,14 +1,11 @@
 // ==UserScript==
-// @name         Immix Auto Process
+// @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      1.5
-// @description  Auto-process toggle, idle timer, and per-operator alarm stats for the Immix Alarm Monitor.
-// @author       SOC Scripts
+// @version      1.8
+// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer, and per-operator alarm stats for the Immix Alarm Monitor.
+// @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
 // @match        https://newapp.smartviewplus.com/SiteMonitor.aspx*
-// @icon         https://raw.githubusercontent.com/socscripts/soc-scripts/main/Vth3mlbl_400x400.jpg
-// @updateURL    https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.user.js
-// @downloadURL  https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.user.js
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -19,10 +16,11 @@
     /* ------------------------------------------------------------------
        Settings
     ------------------------------------------------------------------ */
-    const POLL_MS          = 600;   // queue check / timer refresh
-    const COOLDOWN_MS      = 4000;  // minimum gap between process attempts
-    const STARTUP_GRACE_MS = 5000;  // pause after load so you can hit OFF
+    const POLL_MS          = 150;   // queue check / timer refresh
+    const COOLDOWN_MS      = 500;   // minimum gap between process attempts
     const FADE_MS          = 600;   // background cross-fade
+    // Note: the pause after page load before auto process can fire (your
+    // window to hit OFF) now matches the selected pickup speed below.
 
     const RED_AFTER_S      = 20;    // seconds before the page goes red
     const MAX_SESSION_MS   = 60 * 60 * 1000;  // ignore absurdly long sessions
@@ -31,6 +29,19 @@
     const OFF_COLOR  = '#4a4a4a';   // toggle button, auto process off
     const PAGE_COLOR = '#0b3c78';   // page background, auto process on
     const RED_COLOR  = '#9b1119';   // page background, alarms sitting too long
+
+    // How long an alarm sits in the queue before auto process opens it.
+    const SPEEDS = {
+        fast:    { label: 'Fast',    ms: 500  },
+        default: { label: 'Default', ms: 1100 },
+        slow:    { label: 'Slow',    ms: 2300 }
+    };
+    const SPEED_ORDER  = ['default', 'fast', 'slow'];
+    const DEFAULT_SPEED = 'default';
+
+    function normalizeSpeed(value) {
+        return SPEEDS[value] ? value : DEFAULT_SPEED;
+    }
 
     /* ------------------------------------------------------------------
        Storage - everything except the operator pointer is keyed per user
@@ -115,16 +126,23 @@
         try { localStorage.setItem(LAST_USER_KEY, String(window.currentUserId)); } catch (e) {}
     }
 
-    let enabled     = read('enabled', false) === true;
-    let lastAction  = 0;
-    let currentTint = null;
-    const loadedAt  = Date.now();
-    let button      = null;
-    let panel       = null;
-    let elLabel     = null;
-    let elTimer     = null;
-    let elCount     = null;
-    let elAvg       = null;
+    let enabled      = read('enabled', false) === true;
+    let speed        = normalizeSpeed(read('speed', DEFAULT_SPEED));
+    let lastAction   = 0;
+    let currentTint  = null;
+    let alarmSeenAt  = null;   // when the current queue first showed an alarm
+    const loadedAt   = Date.now();
+    let button       = null;
+    let panel        = null;
+    let elLabel      = null;
+    let elTimer      = null;
+    let elCount      = null;
+    let elAvg        = null;
+    let elSpeed      = null;
+
+    function pickupDelayMs() {
+        return SPEEDS[speed].ms;
+    }
 
     // The clock restarts on page load (which is how you arrive back here
     // after clearing an event), on a Process Alarm click, and when auto
@@ -190,6 +208,13 @@
         applyTint(tintForNow());
     }
 
+    function setSpeed(value) {
+        speed = normalizeSpeed(value);
+        write('speed', speed);
+        alarmSeenAt = null;   // re-measure the current alarm against the new delay
+        paintPanel();
+    }
+
     /* ------------------------------------------------------------------
        Stats panel, sits directly under the Process Alarm button
     ------------------------------------------------------------------ */
@@ -206,6 +231,12 @@
             'text-align:center', 'box-sizing:border-box'
         ].join(';');
 
+        const speedOptions = SPEED_ORDER.map(function (id) {
+            return '<option value="' + id + '">' +
+                   SPEEDS[id].label + ' (' + (SPEEDS[id].ms / 1000) + 's)' +
+                   '</option>';
+        }).join('');
+
         panel.innerHTML =
             '<div id="apLabel" style="font-size:10px;color:#999;">Since last alarm</div>' +
             '<div id="apTimer" style="font-size:26px;font-weight:bold;color:#fff;' +
@@ -214,8 +245,14 @@
             '  <div>Processed <span id="apCount" style="color:#fff;font-weight:bold;">0</span></div>' +
             '  <div>Average <span id="apAvg" style="color:#fff;font-weight:bold;">--</span></div>' +
             '</div>' +
+            '<div style="margin-top:8px;border-top:1px solid #3a3a3a;padding-top:6px;">' +
+            '  <div style="font-size:10px;color:#999;margin-bottom:3px;">Pickup speed</div>' +
+            '  <select id="apSpeed" style="width:100%;background:#2a2a2a;color:#fff;' +
+            '    border:1px solid #4a4a4a;border-radius:3px;font-size:11px;padding:3px 4px;' +
+            '    cursor:pointer;box-sizing:border-box;">' + speedOptions + '</select>' +
+            '</div>' +
             '<a href="javascript:void(0);" id="apReset" ' +
-            'style="display:inline-block;margin-top:6px;font-size:10px;color:#7ea6d8;' +
+            'style="display:inline-block;margin-top:8px;font-size:10px;color:#7ea6d8;' +
             'text-decoration:none;">Reset totals</a>';
 
         host.appendChild(panel);
@@ -224,6 +261,12 @@
         elTimer = panel.querySelector('#apTimer');
         elCount = panel.querySelector('#apCount');
         elAvg   = panel.querySelector('#apAvg');
+        elSpeed = panel.querySelector('#apSpeed');
+
+        elSpeed.value = speed;
+        elSpeed.addEventListener('change', function () {
+            setSpeed(elSpeed.value);
+        });
 
         panel.querySelector('#apReset').addEventListener('click', function () {
             if (confirm('Reset your processed count and average?')) {
@@ -249,6 +292,8 @@
             elTimer.textContent = formatDuration(Date.now() - timerStart);
             elTimer.style.color = hot ? '#ff6b6b' : '#fff';
         }
+
+        if (elSpeed && elSpeed.value !== speed) elSpeed.value = speed;
 
         const stats = getStats();
         elCount.textContent = stats.count;
@@ -349,15 +394,26 @@
         paintPanel();
         applyTint(tintForNow());
 
+        const now = Date.now();
+        const hasAlarm = queueHasAlarm();
+
+        // Track how long the queue has had something in it.
+        if (hasAlarm) {
+            if (alarmSeenAt === null) alarmSeenAt = now;
+        } else {
+            alarmSeenAt = null;
+        }
+
         if (!enabled) return;
 
-        const now = Date.now();
-        if (now - loadedAt < STARTUP_GRACE_MS) return;
+        if (now - loadedAt < pickupDelayMs()) return;   // startup pause follows the speed setting
         if (now - lastAction < COOLDOWN_MS) return;
         if (typeof window.handleFirstAlarm !== 'function') return;
-        if (busy() || !queueHasAlarm()) return;
+        if (busy() || !hasAlarm) return;
+        if (now - alarmSeenAt < pickupDelayMs()) return;   // let it sit the chosen delay
 
         lastAction = now;
+        alarmSeenAt = null;
         try {
             window.handleFirstAlarm();
         } catch (err) {
