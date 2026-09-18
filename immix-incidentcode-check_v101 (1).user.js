@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix - IncidentCode Close Check
 // @namespace    immix-incidentcode-check
-// @version      1.1
+// @version      1.2
 // @description  Warns before closing an event if an IncidentCode was created but media AND a comment were not both attached to it
 // @match        https://newapp.smartviewplus.com/*
 // @run-at       document-idle
@@ -11,29 +11,71 @@
 (function () {
     'use strict';
 
-    const CREATE_TEXT  = 'Creating new IncidentCode for location';
-    const MEDIA_TEXT   = 'Adding media to existing IncidentCode';
-    // "Adding comment 'whatever the user typed' to existing IncidentCode"
-    const COMMENT_REGEX = /Adding comment\s+'.*?'\s+to existing IncidentCode/i;
+    // Set to true, then open the browser console (F12) and click Close Event.
+    // It will print the exact text being searched and which checks passed.
+    const DEBUG = true;
 
-    // Normalize whitespace/tabs so matching is reliable regardless of table formatting
+    // "Incident Code" / "IncidentCode" / "incidentcode" all accepted
+    const IC = String.raw`Incident\s*Code`;
+
+    const CREATE_REGEX = new RegExp(String.raw`Creating new ${IC}\s+for location`, 'i');
+    const MEDIA_REGEX  = new RegExp(String.raw`Adding media to existing ${IC}`, 'i');
+
+    // Accepts straight quotes, curly quotes, double quotes, or no quotes at all,
+    // and tolerates up to 500 chars of user-typed comment in between.
+    const COMMENT_REGEX = new RegExp(
+        String.raw`Adding comment\s*["'\u2018\u2019\u201C\u201D]?[\s\S]{0,500}?["'\u2018\u2019\u201C\u201D]?\s*to existing ${IC}`,
+        'i'
+    );
+
+    // Fallback: the phrase appears at all, even if the tail is truncated in the table
+    const COMMENT_LOOSE_REGEX = /Adding comment\b/i;
+
+    // Normalize whitespace, tabs, NBSP, and smart quotes so matching is reliable
     function normalize(text) {
-        return (text || '').replace(/\s+/g, ' ').trim();
+        return (text || '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/[\u2018\u2019]/g, "'")
+            .replace(/[\u201C\u201D]/g, '"')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     function getEventsLogText() {
-        const container = document.getElementById('currentEventsTable')
-            || document.getElementById('tabs-current-events');
-        if (!container) return '';
-        return normalize(container.innerText || container.textContent);
+        const ids = ['currentEventsTable', 'tabs-current-events'];
+        let combined = '';
+
+        for (const id of ids) {
+            const el = document.getElementById(id);
+            if (el) combined += ' ' + (el.innerText || el.textContent || '');
+        }
+
+        // If the known containers gave us nothing useful, fall back to the whole page.
+        // The log rows are somewhere in the DOM even if the IDs changed.
+        if (!/Incident\s*Code/i.test(combined)) {
+            combined += ' ' + (document.body.innerText || document.body.textContent || '');
+        }
+
+        return normalize(combined);
     }
 
     function incidentCodeCreatedWithoutFollowUp(logText) {
-        const created = logText.includes(CREATE_TEXT);
+        const created    = CREATE_REGEX.test(logText);
+        const hasMedia   = MEDIA_REGEX.test(logText);
+        const hasComment = COMMENT_REGEX.test(logText) || COMMENT_LOOSE_REGEX.test(logText);
+
+        if (DEBUG) {
+            console.log('[IC-Check] created:', created,
+                        '| media:', hasMedia,
+                        '| comment(strict):', COMMENT_REGEX.test(logText),
+                        '| comment(loose):', COMMENT_LOOSE_REGEX.test(logText));
+            // Print just the relevant lines so the console isn't flooded
+            const hits = logText.match(/(Creating new|Adding media|Adding comment)[\s\S]{0,160}/gi);
+            console.log('[IC-Check] matched log fragments:', hits);
+            if (!hits) console.log('[IC-Check] FULL scraped text:', logText);
+        }
+
         if (!created) return false;
-        const hasMedia = logText.includes(MEDIA_TEXT);
-        const hasComment = COMMENT_REGEX.test(logText);
-        // Popup unless BOTH media and a comment were added
         return !(hasMedia && hasComment);
     }
 
