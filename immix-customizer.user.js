@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      1.9
-// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
+// @version      2.0
+// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that stands down while the queue is empty, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
 // @match        https://newapp.smartviewplus.com/SiteMonitor.aspx*
@@ -305,10 +305,15 @@
             elLabel.textContent = 'Timer paused';
             elTimer.textContent = '--';
             elTimer.style.color = '#777';
+        } else if (!queueHasAlarm()) {
+            // Nothing waiting, so the clock stands down until one arrives.
+            elLabel.textContent = 'Queue clear';
+            elTimer.textContent = '--';
+            elTimer.style.color = '#777';
         } else {
             const waited = (Date.now() - timerStart) / 1000;
-            const hot = queueHasAlarm() && waited >= RED_AFTER_S;
-            elLabel.textContent = 'Since last alarm';
+            const hot = waited >= RED_AFTER_S;
+            elLabel.textContent = 'Alarm waiting';
             elTimer.textContent = formatDuration(Date.now() - timerStart);
             elTimer.style.color = hot ? '#ff6b6b' : '#fff';
         }
@@ -416,8 +421,10 @@
         const now = Date.now();
         const hasAlarm = queueHasAlarm();
 
-        // Queue just drained to zero - reset the "since last alarm" clock.
-        if (prevHasAlarm === true && hasAlarm === false) {
+        // Queue drained to zero - reset the clock and stand it down.
+        // Queue went from empty to holding something - start counting from
+        // the moment that alarm landed, not from whenever the last one left.
+        if (prevHasAlarm !== null && prevHasAlarm !== hasAlarm) {
             restartTimer();
         }
         prevHasAlarm = hasAlarm;
