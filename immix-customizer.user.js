@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      1.8
-// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer, and per-operator alarm stats for the Immix Alarm Monitor.
+// @version      1.9
+// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
 // @match        https://newapp.smartviewplus.com/SiteMonitor.aspx*
@@ -102,6 +102,23 @@
         return m + ':' + (s < 10 ? '0' : '') + s;
     }
 
+    /* ------------------------------------------------------------------
+       Daily stats reset - processed count / average clear at local midnight
+    ------------------------------------------------------------------ */
+    function todayStamp() {
+        const d = new Date();
+        return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+    }
+
+    function checkDailyReset() {
+        const today = todayStamp();
+        const lastDay = read('statsDay', null);
+        if (lastDay !== today) {
+            write('stats', { count: 0, totalMs: 0 });
+            write('statsDay', today);
+        }
+    }
+
     /* ==================================================================
        SiteMonitor - stamp the start of an event, then get out of the way
     ================================================================== */
@@ -126,11 +143,14 @@
         try { localStorage.setItem(LAST_USER_KEY, String(window.currentUserId)); } catch (e) {}
     }
 
+    checkDailyReset();
+
     let enabled      = read('enabled', false) === true;
     let speed        = normalizeSpeed(read('speed', DEFAULT_SPEED));
     let lastAction   = 0;
     let currentTint  = null;
     let alarmSeenAt  = null;   // when the current queue first showed an alarm
+    let prevHasAlarm = null;   // queue state on the previous tick, for empty-transition detection
     const loadedAt   = Date.now();
     let button       = null;
     let panel        = null;
@@ -145,8 +165,8 @@
     }
 
     // The clock restarts on page load (which is how you arrive back here
-    // after clearing an event), on a Process Alarm click, and when auto
-    // process is switched back off.
+    // after clearing an event), on a Process Alarm click, when auto
+    // process is switched back off, and whenever the queue drains to zero.
     let timerStart = Date.now();
     write('timerStart', timerStart);
 
@@ -301,7 +321,7 @@
     }
 
     /* ------------------------------------------------------------------
-       Process Alarm click - the only thing that restarts the timer
+       Process Alarm click - restarts the timer
     ------------------------------------------------------------------ */
     function hookProcessAlarm() {
         const btn = document.querySelector('a.btn-processalarm');
@@ -387,15 +407,23 @@
        Main loop
     ------------------------------------------------------------------ */
     function tick() {
+        checkDailyReset();
+
         if (!button) createButton();
         if (!panel) createPanel();
         hookProcessAlarm();
 
-        paintPanel();
-        applyTint(tintForNow());
-
         const now = Date.now();
         const hasAlarm = queueHasAlarm();
+
+        // Queue just drained to zero - reset the "since last alarm" clock.
+        if (prevHasAlarm === true && hasAlarm === false) {
+            restartTimer();
+        }
+        prevHasAlarm = hasAlarm;
+
+        paintPanel();
+        applyTint(tintForNow());
 
         // Track how long the queue has had something in it.
         if (hasAlarm) {
