@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      2.2.0
+// @version      2.3.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,13 +29,22 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '2.2.0';
+    const SCRIPT_VERSION = '2.3.0';
 
     /* ------------------------------------------------------------------
        Settings
     ------------------------------------------------------------------ */
     const POLL_MS          = 150;   // queue check / timer refresh
-    const COOLDOWN_MS      = 500;   // minimum gap between process attempts
+    const COOLDOWN_MS      = 100;   // minimum gap between process attempts
+    // Note: the effective gap between pickups is the selected speed below,
+    // not this. After each pickup the sit-timer restarts, so a Fast pickup
+    // cannot fire again for 500ms regardless of what COOLDOWN_MS says.
+
+    // If auto process is on, alarms are waiting, and something is blocking
+    // every attempt for this long, treat it as a stall: report which flag is
+    // stuck and, when STALL_RECOVER is on, clear the recoverable ones.
+    const STALL_AFTER_MS   = 15000;
+    const STALL_RECOVER    = true;
     const FADE_MS          = 600;   // background cross-fade
     // Note: the pause after page load before auto process can fire (your
     // window to hit OFF) now matches the selected pickup speed below.
@@ -59,11 +68,12 @@
 
     // How long an alarm sits in the queue before auto process opens it.
     const SPEEDS = {
+        instant: { label: 'Instant', ms: 100  },
         fast:    { label: 'Fast',    ms: 500  },
         default: { label: 'Default', ms: 1100 },
         slow:    { label: 'Slow',    ms: 2300 }
     };
-    const SPEED_ORDER  = ['default', 'fast', 'slow'];
+    const SPEED_ORDER  = ['default', 'fast', 'instant', 'slow'];
     const DEFAULT_SPEED = 'default';
 
     function normalizeSpeed(value) {
@@ -224,7 +234,7 @@
     const MAX_QUEUE    = 2000;   // events held locally before the oldest drop
     const MAX_BATCH    = 100;    // events per request
 
-    const POLICY_MS  = 5 * 1000;   // how often to ask the server for an override
+    const POLICY_MS  = 60 * 1000;   // how often to ask the server for an override
     const POLICY_KEY = 'immixAutoProcess:policy';
 
     const QUEUE_KEY  = 'immixAutoProcess:telemetryQueue';
@@ -477,6 +487,8 @@
     let lastAction   = 0;
     let currentTint  = null;
     let alarmSeenAt  = null;   // when the current queue first showed an alarm
+    let blockedSince = null;   // when the current blocked-with-alarms run began
+    let lastStallAt  = 0;      // last time a stall was reported
     let lockedWindow = null;   // the mandatory window in force, or null
     let flashUntil   = 0;      // show the "locked" message on the button until this time
     let prevHasAlarm = null;   // queue state on the previous tick, for empty-transition detection
@@ -807,18 +819,55 @@
         return !!el && !el.classList.contains('hide');
     }
 
-    function busy() {
-        if (W.redirectingToSiteMonitor === true) return true;
-        if (W._currentlyRequestingHandleEvent === true) return true;
-        if (W.eventHandleInProgress === true) return true;
-        if (W.alarmMonitor && W.alarmMonitor.update === false) return true;
+    // Everything currently stopping a pickup, by name. Knowing *which* guard
+    // is set is what makes a stall diagnosable rather than a mystery.
+    function blockingReasons() {
+        const r = [];
+        if (W.redirectingToSiteMonitor === true)        r.push('redirectingToSiteMonitor');
+        if (W._currentlyRequestingHandleEvent === true) r.push('currentlyRequestingHandleEvent');
+        if (W.eventHandleInProgress === true)           r.push('eventHandleInProgress');
+        if (W.alarmMonitor && W.alarmMonitor.update === false) r.push('alarmMonitorUpdate');
 
         const smw = W.alarmMonitor && W.alarmMonitor.siteMonitorWindow;
-        if (smw && !smw.closed) return true;
+        if (smw && !smw.closed) r.push('siteMonitorWindow');
 
-        if (dialogOpen()) return true;
-        if (connectionError()) return true;
-        return false;
+        if (dialogOpen())      r.push('dialogOpen');
+        if (connectionError()) r.push('connectionError');
+        return r;
+    }
+
+    function busy() {
+        return blockingReasons().length > 0;
+    }
+
+    /**
+     * Clear the guards that can latch on after a failed request. Deliberately
+     * conservative: an open dialog or a live site monitor window is a real
+     * reason to wait, so those are reported but never touched. A
+     * siteMonitorWindow reference is only dropped once the window has
+     * genuinely closed.
+     */
+    function clearStuckFlags() {
+        const cleared = [];
+        try {
+            if (W.redirectingToSiteMonitor === true) {
+                W.redirectingToSiteMonitor = false; cleared.push('redirectingToSiteMonitor');
+            }
+            if (W._currentlyRequestingHandleEvent === true) {
+                W._currentlyRequestingHandleEvent = false; cleared.push('currentlyRequestingHandleEvent');
+            }
+            if (W.eventHandleInProgress === true) {
+                W.eventHandleInProgress = false; cleared.push('eventHandleInProgress');
+            }
+            if (W.alarmMonitor && W.alarmMonitor.update === false) {
+                W.alarmMonitor.update = true; cleared.push('alarmMonitorUpdate');
+            }
+            const smw = W.alarmMonitor && W.alarmMonitor.siteMonitorWindow;
+            if (smw && smw.closed) {
+                W.alarmMonitor.siteMonitorWindow = null; cleared.push('siteMonitorWindow');
+            }
+        } catch (e) {}
+        return cleared;
     }
 
     /* ------------------------------------------------------------------
@@ -876,7 +925,37 @@
         if (now - loadedAt < pickupDelayMs()) return;   // startup pause follows the speed setting
         if (now - lastAction < COOLDOWN_MS) return;
         if (typeof W.handleFirstAlarm !== 'function') return;
-        if (busy() || !hasAlarm) return;
+
+        // Watchdog. If alarms are waiting but something keeps blocking every
+        // attempt, the script would otherwise sit quiet indefinitely.
+        const reasons = hasAlarm ? blockingReasons() : [];
+
+        if (reasons.length) {
+            if (blockedSince === null) blockedSince = now;
+            const stuckMs = now - blockedSince;
+
+            if (stuckMs >= STALL_AFTER_MS && now - lastStallAt >= STALL_AFTER_MS) {
+                lastStallAt = now;
+                const cleared = STALL_RECOVER ? clearStuckFlags() : [];
+                console.warn('[Auto process] stalled ' + Math.round(stuckMs / 1000) +
+                             's, blocked by: ' + reasons.join(', ') +
+                             (cleared.length ? ' | cleared: ' + cleared.join(', ') : ''));
+                track('stall', {
+                    blockedMs:  stuckMs,
+                    reasons:    reasons.join(','),
+                    cleared:    cleared.join(','),
+                    recovered:  cleared.length > 0,
+                    queueSize:  queueSize(),
+                    speed:      speed
+                });
+                flush();
+            }
+            return;
+        }
+
+        blockedSince = null;
+
+        if (!hasAlarm) return;
         if (now - alarmSeenAt < pickupDelayMs()) return;   // let it sit the chosen delay
 
         track('pickup', {
