@@ -234,7 +234,7 @@
     const MAX_QUEUE    = 2000;   // events held locally before the oldest drop
     const MAX_BATCH    = 100;    // events per request
 
-    const POLICY_MS  = 60 * 1000;   // how often to ask the server for an override
+    const POLICY_MS  = 3 * 1000;   // how often to ask the server for an override
     const POLICY_KEY = 'immixAutoProcess:policy';
 
     const QUEUE_KEY  = 'immixAutoProcess:telemetryQueue';
