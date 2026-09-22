@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      2.3.0
+// @version      2.2.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
