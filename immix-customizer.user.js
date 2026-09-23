@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      2.3.0
+// @version      3.1.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '2.3.0';
+    const SCRIPT_VERSION = '3.1.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -55,6 +55,7 @@
     const ON_COLOR   = '#1b6fd3';   // toggle button, auto process on
     const OFF_COLOR  = '#4a4a4a';   // toggle button, auto process off
     const LOCK_COLOR = '#146b3a';   // toggle button, auto process required on
+    const OFF_LOCK_COLOR = '#8a5a12';   // toggle button, auto process forced off by a supervisor
 
     // Windows where auto process must stay on. Local time on the operator's
     // machine, 24-hour "HH:MM". A window whose end is earlier than its start
@@ -109,10 +110,14 @@
         return w ? (w.from + ' to ' + w.to) : '';
     }
 
-    // Why auto process is locked on right now, or null if it is free.
-    // A supervisor override outranks the schedule because it has no end time.
+    // Why auto process is locked ON right now, or null if it is free to turn
+    // off. A supervisor's "on" override outranks the schedule because it has
+    // no end time. A supervisor's "off" override outranks everything here,
+    // including a mandatory window - see forcedOff(), checked separately by
+    // callers that need to know whether turning ON is blocked instead.
     function lockReason() {
-        if (typeof forcedOn === 'function' && forcedOn()) {
+        if (forcedOff()) return null;
+        if (forcedOn()) {
             return { kind: 'policy', label: 'required by your supervisor', until: null };
         }
         const w = activeWindow();
@@ -217,29 +222,39 @@
 
 
     /* ==================================================================
-       Telemetry
+       Reporting (lean mode)
 
-       Every measurement is written to a local queue first, then shipped to
-       the collector in batches. If the collector is unreachable the queue
-       survives page loads and browser restarts and goes out later, so a
-       flaky connection loses nothing. The server dedupes on eventId, so a
-       retry that actually did land the first time is harmless.
+       Nothing is sent per event. Each measurement adds to a small set of
+       daily counters kept on this machine. Every CHECKIN_MS the Alarm
+       Monitor page sends those counters in one request, and the reply
+       carries the supervisor's force-on setting. That is one request and
+       one database write per agent per interval, which keeps 64 agents
+       comfortably inside Cloudflare's free plan.
+
+       Counters live in localStorage, so page loads and navigating into an
+       alarm and back do not reset them, and a missed check-in just means
+       the next one carries the same totals.
     ================================================================== */
-    const TELEMETRY_ENABLED  = true;
-    const TELEMETRY_ENDPOINT = 'https://immix-telemetry.jdale-e67.workers.dev/ingest';
-    const TELEMETRY_KEY      = '7kR9mQ2xL8pT5nV4cW6hJ3fD1bS8yA9eG0uZ';
+    const TELEMETRY_ENABLED = true;
+    const TELEMETRY_BASE    = 'https://immix-telemetry.jdale-e67.workers.dev';
+    const TELEMETRY_KEY     = '7kR9mQ2xL8pT5nV4cW6hJ3fD1bS8yA9eG0uZ';
 
-    const FLUSH_MS     = 20 * 1000;
-    const HEARTBEAT_MS = 5 * 60 * 1000;
-    const MAX_QUEUE    = 2000;   // events held locally before the oldest drop
-    const MAX_BATCH    = 100;    // events per request
+    // How often each agent checks in. This is also how quickly a Force on
+    // change from the dashboard reaches the agent. See the note in the
+    // setup guide before lowering it: 32 agents at 45s is about 61,000
+    // requests a day in the worst case, against a free limit of 100,000.
+    const CHECKIN_MS      = 45 * 1000;
+    const EARLY_GAP_MS    = 15 * 1000;   // a toggle may check in early, but no more often than this
+    const MAX_OFF_STRETCH = 12 * 60 * 60 * 1000;
 
-    const POLICY_MS  = 3 * 1000;   // how often to ask the server for an override
-    const POLICY_KEY = 'immixAutoProcess:policy';
+    const POLICY_KEY       = 'immixAutoProcess:policy';
+    const LAST_CHECKIN_KEY = 'immixAutoProcess:lastCheckin';
+    const DEVICE_KEY       = 'immixAutoProcess:deviceId';
+    const NAME_KEY         = 'immixAutoProcess:operatorName';
+    const OLD_QUEUE_KEY    = 'immixAutoProcess:telemetryQueue';
 
-    const QUEUE_KEY  = 'immixAutoProcess:telemetryQueue';
-    const DEVICE_KEY = 'immixAutoProcess:deviceId';
-    const NAME_KEY   = 'immixAutoProcess:operatorName';
+    // The event queue from earlier versions is no longer used.
+    try { localStorage.removeItem(OLD_QUEUE_KEY); } catch (e) {}
 
     const PAGE_NAME = /sitemonitor\.aspx/i.test(location.pathname)
         ? 'sitemonitor' : 'alarmmonitor';
@@ -251,8 +266,6 @@
         } catch (e) {}
         return 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
     }
-
-    const SESSION_ID = randomId();
 
     function deviceId() {
         try {
@@ -269,7 +282,6 @@
 
     // The Immix header renders the signed-in operator as
     //   <a id="UserFullName">Operator J. Dale (Dispatcher)</a>
-    // Confirmed against the AlarmMonitor page source.
     function operatorName() {
         const el  = document.getElementById('UserFullName');
         const raw = el && el.textContent ? el.textContent.replace(/\s+/g, ' ').trim() : '';
@@ -278,8 +290,6 @@
             try { localStorage.setItem(NAME_KEY, raw); } catch (e) {}
             return raw;
         }
-
-        // SiteMonitor popups and odd page states fall back to the last name seen.
         try { return localStorage.getItem(NAME_KEY) || null; } catch (e) { return null; }
     }
 
@@ -291,98 +301,79 @@
         return m ? m[1].trim() : null;
     }
 
-    function readQueue() {
-        try {
-            const raw = localStorage.getItem(QUEUE_KEY);
-            const q = raw ? JSON.parse(raw) : [];
-            return Array.isArray(q) ? q : [];
-        } catch (e) {
-            return [];
-        }
+    /* ------------------------------------------------------------------
+       Daily counters
+    ------------------------------------------------------------------ */
+    function localDay() {
+        const d = new Date();
+        const pad = function (n) { return (n < 10 ? '0' : '') + n; };
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     }
 
-    function writeQueue(q) {
-        try {
-            localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
-        } catch (e) {
-            // Storage full or blocked. Drop the oldest half and try once more.
-            try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q.slice(-Math.floor(MAX_QUEUE / 2)))); } catch (e2) {}
-        }
+    function blankDaily(day) {
+        return {
+            day: day,
+            alarms: 0, alarmMs: 0,
+            auto: 0, manual: 0,
+            satMs: 0, satN: 0,
+            off: 0, offMs: 0,
+            blocked: 0, stalls: 0,
+            lastStall: null, lastStallAt: null
+        };
     }
 
+    function readDaily() {
+        const today = localDay();
+        const d = read('daily', null);
+        return (d && d.day === today) ? d : blankDaily(today);
+    }
+
+    // Kept under its old name so every existing measurement point still works.
     function track(type, data) {
         if (!TELEMETRY_ENABLED) return;
-        const q = readQueue();
-        q.push({
-            eventId:       randomId(),
-            type:          type,
-            userId:        uid(),
-            userName:      operatorName(),
-            userRole:      operatorRole(),
-            deviceId:      deviceId(),
-            sessionId:     SESSION_ID,
-            clientTs:      Date.now(),
-            tzOffsetMin:   new Date().getTimezoneOffset(),
-            scriptVersion: SCRIPT_VERSION,
-            page:          PAGE_NAME,
-            data:          data || {}
-        });
-        while (q.length > MAX_QUEUE) q.shift();
-        writeQueue(q);
-    }
+        data = data || {};
+        const d = readDaily();
 
-    function post(body, done) {
-        if (typeof GM_xmlhttpRequest === 'function') {
-            GM_xmlhttpRequest({
-                method:  'POST',
-                url:     TELEMETRY_ENDPOINT,
-                headers: { 'Content-Type': 'application/json', 'X-Api-Key': TELEMETRY_KEY },
-                data:    body,
-                timeout: 15000,
-                onload:     function (r) { done(r.status >= 200 && r.status < 300); },
-                onerror:    function () { done(false); },
-                ontimeout:  function () { done(false); }
-            });
-            return;
+        switch (type) {
+            case 'alarm_session':
+                d.alarms += 1;
+                d.alarmMs += Math.max(0, data.durationMs || 0);
+                break;
+            case 'pickup':
+                if (data.mode === 'manual') {
+                    d.manual += 1;
+                    if (typeof data.queueWaitMs === 'number' && data.queueWaitMs >= 0) {
+                        d.satMs += data.queueWaitMs;
+                        d.satN  += 1;
+                    }
+                } else {
+                    d.auto += 1;
+                }
+                break;
+            case 'toggle':
+                if (data.state === 'off') d.off += 1;
+                if (data.state === 'on' && data.prevState === 'off' &&
+                    typeof data.prevStateMs === 'number' && data.prevStateMs < MAX_OFF_STRETCH) {
+                    d.offMs += data.prevStateMs;
+                }
+                break;
+            case 'override_blocked':
+                d.blocked += 1;
+                break;
+            case 'stall':
+                d.stalls += 1;
+                d.lastStall = data.reasons || null;
+                d.lastStallAt = Date.now();
+                break;
+            default:
+                return;   // everything else is not counted in lean mode
         }
-        // Fallback if the grant is missing. Subject to the page's CSP.
-        try {
-            fetch(TELEMETRY_ENDPOINT, {
-                method:  'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Api-Key': TELEMETRY_KEY },
-                body:    body,
-                keepalive: true
-            }).then(function (r) { done(r.ok); }, function () { done(false); });
-        } catch (e) {
-            done(false);
-        }
-    }
-
-    let sending = false;
-
-    function flush() {
-        if (!TELEMETRY_ENABLED || sending) return;
-        const q = readQueue();
-        if (!q.length) return;
-
-        const batch = q.slice(0, MAX_BATCH);
-        sending = true;
-
-        post(JSON.stringify({ events: batch }), function (ok) {
-            sending = false;
-            if (!ok) return;   // leave it queued, try again next flush
-            const sent = {};
-            batch.forEach(function (e) { sent[e.eventId] = true; });
-            writeQueue(readQueue().filter(function (e) { return !sent[e.eventId]; }));
-        });
+        write('daily', d);
     }
 
     /* ------------------------------------------------------------------
-       Remote override
-
-       A supervisor can force auto process on for one operator from the
-       dashboard. The answer is cached so a dropped connection leaves the
-       last known instruction in force rather than silently lifting it.
+       Supervisor override, cached so a dropped connection or a server
+       error leaves the last known instruction in force.
     ------------------------------------------------------------------ */
     function policyCache() {
         try {
@@ -393,66 +384,128 @@
         }
     }
 
-    function forcedOn() {
+    // 'on', 'off', or null (no override). Reads what applyPolicyReply cached,
+    // so it works the same whether the last successful check-in came back
+    // just now or the connection has been down since.
+    function forcedMode() {
         const p = policyCache();
-        return !!(p && p.forceOn);
+        return (p && (p.mode === 'on' || p.mode === 'off')) ? p.mode : null;
     }
 
-    function fetchPolicy() {
+    function forcedOn()  { return forcedMode() === 'on'; }
+    function forcedOff() { return forcedMode() === 'off'; }
+
+    /* ------------------------------------------------------------------
+       Check-in
+    ------------------------------------------------------------------ */
+    function lastCheckin() {
+        try { return parseInt(localStorage.getItem(LAST_CHECKIN_KEY) || '0', 10) || 0; }
+        catch (e) { return 0; }
+    }
+
+    function markCheckin(ts) {
+        try { localStorage.setItem(LAST_CHECKIN_KEY, String(ts)); } catch (e) {}
+    }
+
+    function checkinBody() {
+        const d = readDaily();
+        const since = read('stateSince', null);
+        const now = Date.now();
+
+        // Include the off stretch still running, so a long one shows up
+        // before the operator switches back on.
+        let offMs = d.offMs;
+        if (!enabled && since && now - since < MAX_OFF_STRETCH) offMs += now - since;
+
+        const lock = lockReason();
+        return JSON.stringify({
+            userId:        uid(),
+            userName:      operatorName(),
+            userRole:      operatorRole(),
+            deviceId:      deviceId(),
+            scriptVersion: SCRIPT_VERSION,
+            day:           d.day,
+            tzOffsetMin:   new Date().getTimezoneOffset(),
+            enabled:       enabled,
+            speed:         speed,
+            lockKind:      lock ? lock.kind : null,
+            alarms:        d.alarms,
+            alarmMs:       d.alarmMs,
+            auto:          d.auto,
+            manual:        d.manual,
+            satMs:         d.satMs,
+            satN:          d.satN,
+            off:           d.off,
+            offMs:         offMs,
+            blocked:       d.blocked,
+            stalls:        d.stalls,
+            lastStall:     d.lastStall,
+            lastStallAt:   d.lastStallAt
+        });
+    }
+
+    function applyPolicyReply(text) {
+        let data;
+        try { data = JSON.parse(text); } catch (e) { return; }
+        if (!data) return;
+
+        let mode = null;
+        if (data.mode === 'on' || data.mode === 'off') mode = data.mode;
+        else if (typeof data.force_on === 'boolean') mode = data.force_on ? 'on' : null;
+        else return;   // reply didn't carry a usable answer; keep the cached one
+
+        try {
+            localStorage.setItem(POLICY_KEY + ':' + uid(), JSON.stringify({
+                mode:      mode,
+                note:      data.note || null,
+                fetchedAt: Date.now()
+            }));
+        } catch (e) {}
+    }
+
+    function checkin() {
         if (!TELEMETRY_ENABLED) return;
         const who = uid();
         if (!who || who === 'anon') return;
 
-        const url = TELEMETRY_ENDPOINT.replace(/\/ingest$/, '/policy') +
-                    '?user=' + encodeURIComponent(who);
+        // Claim the slot before sending, so a second tab or a reload in
+        // the next few seconds does not send a duplicate.
+        markCheckin(Date.now());
 
-        const handle = function (ok, text) {
-            if (!ok) return;   // keep whatever we had
-            let data;
-            try { data = JSON.parse(text); } catch (e) { return; }
-            if (!data || typeof data.force_on !== 'boolean') return;
-
-            const was = forcedOn();
-            try {
-                localStorage.setItem(POLICY_KEY + ':' + who, JSON.stringify({
-                    forceOn:   data.force_on,
-                    note:      data.note || null,
-                    fetchedAt: Date.now()
-                }));
-            } catch (e) {}
-
-            if (was !== data.force_on) {
-                track('policy_change', { forceOn: data.force_on, note: data.note || null });
-            }
-        };
+        const url  = TELEMETRY_BASE + '/checkin';
+        const body = checkinBody();
+        const headers = { 'Content-Type': 'application/json', 'X-Api-Key': TELEMETRY_KEY };
 
         if (typeof GM_xmlhttpRequest === 'function') {
             GM_xmlhttpRequest({
-                method: 'GET', url: url,
-                headers: { 'X-Api-Key': TELEMETRY_KEY },
-                timeout: 15000,
-                onload:    function (r) { handle(r.status >= 200 && r.status < 300, r.responseText); },
-                onerror:   function () {},
-                ontimeout: function () {}
+                method: 'POST', url: url, headers: headers, data: body, timeout: 15000,
+                onload: function (r) {
+                    // Only a 200 carries a trustworthy policy. Anything else,
+                    // including the free-tier limit being reached, keeps the cache.
+                    if (r.status >= 200 && r.status < 300) applyPolicyReply(r.responseText);
+                },
+                onerror: function () {}, ontimeout: function () {}
             });
-        } else {
-            try {
-                fetch(url, { headers: { 'X-Api-Key': TELEMETRY_KEY } })
-                    .then(function (r) { return r.ok ? r.text() : null; })
-                    .then(function (t) { if (t) handle(true, t); }, function () {});
-            } catch (e) {}
+            return;
         }
+        try {
+            fetch(url, { method: 'POST', headers: headers, body: body })
+                .then(function (r) { return r.ok ? r.text() : null; })
+                .then(function (t) { if (t) applyPolicyReply(t); }, function () {});
+        } catch (e) {}
     }
 
-    setInterval(fetchPolicy, POLICY_MS);
-    fetchPolicy();
+    // Called on the scheduler tick; sends only when an interval has passed.
+    function checkinIfDue() {
+        if (Date.now() - lastCheckin() >= CHECKIN_MS) checkin();
+    }
 
-    setInterval(flush, FLUSH_MS);
-    window.addEventListener('pagehide', flush);
-    document.addEventListener('visibilitychange', function () {
-        if (document.visibilityState === 'hidden') flush();
-    });
-    flush();   // anything left over from the previous page load
+    // Kept under its old name. A toggle or a blocked attempt reports early
+    // so the dashboard catches up quickly, but never more than once per
+    // EARLY_GAP_MS.
+    function flush() {
+        if (Date.now() - lastCheckin() >= EARLY_GAP_MS) checkin();
+    }
 
     /* ==================================================================
        SiteMonitor - stamp the start of an event, then get out of the way
@@ -467,7 +520,6 @@
             write('pending', { eventId: eventId, startedAt: Date.now() });
             track('alarm_open', { alarmEventId: eventId });
         }
-        flush();
         return;
     }
 
@@ -543,8 +595,19 @@
         button.addEventListener('click', function (e) {
             e.preventDefault();
 
+            const wantsOn = !enabled;
+
+            if (wantsOn && forcedOff()) {
+                // A supervisor turned this off. Say so rather than failing silently.
+                flashUntil = Date.now() + 3000;
+                paintButton();
+                track('override_blocked', { lockKind: 'policy-off', window: null, queueSize: queueSize() });
+                flush();
+                return;
+            }
+
             const lock = lockReason();
-            if (lock && enabled) {
+            if (!wantsOn && lock) {
                 // Required on right now. Say so rather than failing silently.
                 flashUntil = Date.now() + 3000;
                 paintButton();
@@ -557,7 +620,7 @@
                 return;
             }
 
-            setEnabled(!enabled, 'user');
+            setEnabled(wantsOn, 'user');
         });
 
         li.appendChild(button);
@@ -565,35 +628,53 @@
         paintButton();
     }
 
+    // Works out what the button should say, then writes it only if it
+    // differs. Called every tick, so a change in *why* auto process is
+    // locked (a window opening, a supervisor override arriving) and the end
+    // of the "Required on" flash both show up straight away.
     function paintButton() {
         if (!button) return;
 
         const lock = lockReason();
+        const off  = forcedOff();
+        let text, color, title, cursor;
 
-        if (lock && Date.now() < flashUntil) {
-            button.textContent = lock.until ? ('Required on until ' + lock.until)
-                                            : 'Required on';
-            button.style.backgroundColor = LOCK_COLOR;
-            button.title = 'Auto process is ' + lock.label + '.';
-            button.style.cursor = 'not-allowed';
-            return;
+        if (off && Date.now() < flashUntil) {
+            text   = 'Off \u2014 supervisor';
+            color  = OFF_LOCK_COLOR;
+            title  = 'Auto process was turned off by a supervisor.';
+            cursor = 'not-allowed';
+        } else if (off) {
+            text   = 'Auto process: off (supervisor)';
+            color  = OFF_LOCK_COLOR;
+            title  = 'A supervisor turned this off. It stays off until they turn it back on.';
+            cursor = 'not-allowed';
+        } else if (lock && Date.now() < flashUntil) {
+            text   = lock.until ? ('Required on until ' + lock.until) : 'Required on';
+            color  = LOCK_COLOR;
+            title  = 'Auto process is ' + lock.label + '.';
+            cursor = 'not-allowed';
+        } else if (lock && enabled) {
+            text   = lock.kind === 'policy' ? 'Auto process: on (required)'
+                                            : 'Auto process: on (scheduled)';
+            color  = LOCK_COLOR;
+            title  = 'Auto process is ' + lock.label +
+                     (lock.until ? '. It can be switched off after ' + lock.until + '.' : '.');
+            cursor = 'not-allowed';
+        } else {
+            text   = enabled ? 'Auto process: on' : 'Auto process: off';
+            color  = enabled ? ON_COLOR : OFF_COLOR;
+            title  = 'Automatically open the oldest alarm in the queue';
+            cursor = 'pointer';
         }
 
-        if (lock && enabled) {
-            button.textContent = lock.kind === 'policy'
-                ? 'Auto process: on (required)'
-                : 'Auto process: on (scheduled)';
-            button.style.backgroundColor = LOCK_COLOR;
-            button.title = 'Auto process is ' + lock.label +
-                (lock.until ? '. It can be switched off after ' + lock.until + '.' : '.');
-            button.style.cursor = 'not-allowed';
-            return;
+        if (button.textContent !== text) button.textContent = text;
+        if (button.dataset.apColor !== color) {
+            button.style.backgroundColor = color;
+            button.dataset.apColor = color;
         }
-
-        button.textContent = enabled ? 'Auto process: on' : 'Auto process: off';
-        button.style.backgroundColor = enabled ? ON_COLOR : OFF_COLOR;
-        button.title = 'Automatically open the oldest alarm in the queue';
-        button.style.cursor = 'pointer';
+        if (button.title !== title) button.title = title;
+        if (button.style.cursor !== cursor) button.style.cursor = cursor;
     }
 
     function setEnabled(value, source) {
@@ -603,8 +684,10 @@
         const wasAuto  = enabled;
         const lock     = lockReason();
 
-        // Nothing may switch it off while a lock is in force.
+        // Nothing may switch it off while a lock is in force, and nothing
+        // may switch it on while a supervisor has forced it off.
         if (value === false && lock) return;
+        if (value === true && forcedOff()) return;
         if (value === enabled) return;
 
         enabled = value;
@@ -891,6 +974,7 @@
         }
 
         if (lock && !enabled) setEnabled(true, lock.kind);
+        if (forcedOff() && enabled) setEnabled(false, 'policy-off');
     }
 
     function tick() {
@@ -910,6 +994,7 @@
         }
         prevHasAlarm = hasAlarm;
 
+        paintButton();
         paintPanel();
         applyTint(tintForNow());
 
@@ -989,22 +1074,18 @@
         userAgent: navigator.userAgent
     });
 
-    setInterval(function () {
-        track('heartbeat', {
-            enabled:           enabled,
-            lockedOn:          (lockReason() || {}).label || null,
-            speed:             speed,
-            queueSize:         queueSize(),
-            sinceLastAlarmMs:  Date.now() - timerStart,
-            stats:             getStats()
-        });
-    }, HEARTBEAT_MS);
 
     lockedWindow = lockReason();   // seed, so startup isn't logged as a change
     if (lockedWindow && !enabled) setEnabled(true, lockedWindow.kind);
+    if (forcedOff() && enabled) setEnabled(false, 'policy-off');
 
     createButton();
     createPanel();
     hookProcessAlarm();
     setInterval(tick, POLL_MS);
+
+    // Check in once the page state exists, then on the schedule. The five
+    // second tick only reads a timestamp; the interval itself is CHECKIN_MS.
+    checkinIfDue();
+    setInterval(checkinIfDue, 5000);
 })();
