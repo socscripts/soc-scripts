@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.1.0
+// @version      3.2.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.1.0';
+    const SCRIPT_VERSION = '3.2.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -805,10 +805,11 @@
             elTimer.textContent = '--';
             elTimer.style.color = '#777';
         } else {
-            const waited = (Date.now() - timerStart) / 1000;
-            const hot = queueHasAlarm() && waited >= RED_AFTER_S;
+            const hasAlarm = queueHasAlarm();
+            const waitedMs = hasAlarm ? (Date.now() - timerStart) : 0;
+            const hot = hasAlarm && (waitedMs / 1000) >= RED_AFTER_S;
             elLabel.textContent = 'Since last alarm';
-            elTimer.textContent = formatDuration(Date.now() - timerStart);
+            elTimer.textContent = formatDuration(waitedMs);
             elTimer.style.color = hot ? '#ff6b6b' : '#fff';
         }
 
