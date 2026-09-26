@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.2.0
+// @version      3.3.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.2.0';
+    const SCRIPT_VERSION = '3.3.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -116,9 +116,13 @@
     // including a mandatory window - see forcedOff(), checked separately by
     // callers that need to know whether turning ON is blocked instead.
     function lockReason() {
-        if (forcedOff()) return null;
-        if (forcedOn()) {
-            return { kind: 'policy', label: 'required by your supervisor', until: null };
+        const e = effectivePolicy();
+        if (e && e.kind === 'suspended') return null;
+        if (e && e.mode === 'off') return null;
+        if (e && e.mode === 'on') {
+            return e.kind === 'global'
+                ? { kind: 'global', label: 'required for everyone by a supervisor', until: null }
+                : { kind: 'policy', label: 'required by your supervisor', until: null };
         }
         const w = activeWindow();
         if (w) {
@@ -248,6 +252,7 @@
     const MAX_OFF_STRETCH = 12 * 60 * 60 * 1000;
 
     const POLICY_KEY       = 'immixAutoProcess:policy';
+    const GLOBAL_KEY       = 'immixAutoProcess:global';
     const LAST_CHECKIN_KEY = 'immixAutoProcess:lastCheckin';
     const DEVICE_KEY       = 'immixAutoProcess:deviceId';
     const NAME_KEY         = 'immixAutoProcess:operatorName';
@@ -384,16 +389,54 @@
         }
     }
 
-    // 'on', 'off', or null (no override). Reads what applyPolicyReply cached,
-    // so it works the same whether the last successful check-in came back
-    // just now or the connection has been down since.
-    function forcedMode() {
+    // Floor-wide controls from the dashboard's central buttons. Shared by
+    // every operator on this browser, so it isn't keyed by user.
+    //   suspendUntil  schedule lock lifted until this time (agents choose)
+    //   forceMode     'on' | 'off' for everyone, outside the windows only
+    //   forceUntil    when that force ends (the start of the next window)
+    function globalCache() {
+        try {
+            const raw = localStorage.getItem(GLOBAL_KEY);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Which instruction is in charge right now, in priority order:
+    //   1. a suspended schedule, during a window    -> nobody is forced either way
+    //   2. a floor-wide force, outside the windows  -> everyone on (or off)
+    //   3. this operator's own Force on / Force off
+    // Central controls win over individual ones. The schedule itself is
+    // handled in lockReason() and applies when none of these do.
+    function effectivePolicy() {
+        const now = Date.now();
+        const g = globalCache();
+        const inWindow = !!activeWindow();
+
+        if (inWindow && g && g.suspendUntil && now < g.suspendUntil) {
+            return { kind: 'suspended', mode: null };
+        }
+        if (!inWindow && g && (g.forceMode === 'on' || g.forceMode === 'off') &&
+            g.forceUntil && now < g.forceUntil) {
+            return { kind: 'global', mode: g.forceMode };
+        }
         const p = policyCache();
-        return (p && (p.mode === 'on' || p.mode === 'off')) ? p.mode : null;
+        if (p && (p.mode === 'on' || p.mode === 'off')) return { kind: 'policy', mode: p.mode };
+        return null;
+    }
+
+    function forcedMode() {
+        const e = effectivePolicy();
+        return e ? e.mode : null;
     }
 
     function forcedOn()  { return forcedMode() === 'on'; }
     function forcedOff() { return forcedMode() === 'off'; }
+    function scheduleSuspended() {
+        const e = effectivePolicy();
+        return !!(e && e.kind === 'suspended');
+    }
 
     /* ------------------------------------------------------------------
        Check-in
@@ -418,6 +461,11 @@
         if (!enabled && since && now - since < MAX_OFF_STRETCH) offMs += now - since;
 
         const lock = lockReason();
+        const p = policyCache();
+        const g = globalCache();
+        let state = lock ? lock.kind : null;
+        if (forcedOff()) state = 'off';
+        else if (!lock && scheduleSuspended()) state = 'suspended';
         return JSON.stringify({
             userId:        uid(),
             userName:      operatorName(),
@@ -428,7 +476,9 @@
             tzOffsetMin:   new Date().getTimezoneOffset(),
             enabled:       enabled,
             speed:         speed,
-            lockKind:      lock ? lock.kind : null,
+            lockKind:      state,
+            policySeen:    p && p.updatedAt ? p.updatedAt : 0,
+            globalSeen:    g && g.updatedAt ? g.updatedAt : 0,
             alarms:        d.alarms,
             alarmMs:       d.alarmMs,
             auto:          d.auto,
@@ -449,18 +499,42 @@
         try { data = JSON.parse(text); } catch (e) { return; }
         if (!data) return;
 
-        let mode = null;
-        if (data.mode === 'on' || data.mode === 'off') mode = data.mode;
-        else if (typeof data.force_on === 'boolean') mode = data.force_on ? 'on' : null;
-        else return;   // reply didn't carry a usable answer; keep the cached one
+        let changed = false;
 
-        try {
-            localStorage.setItem(POLICY_KEY + ':' + uid(), JSON.stringify({
-                mode:      mode,
-                note:      data.note || null,
-                fetchedAt: Date.now()
-            }));
-        } catch (e) {}
+        let mode;
+        if (data.mode === 'on' || data.mode === 'off' || data.mode === null) mode = data.mode;
+        else if (typeof data.force_on === 'boolean') mode = data.force_on ? 'on' : null;
+
+        if (mode !== undefined) {
+            const before = policyCache();
+            const at = typeof data.policy_at === 'number' ? data.policy_at : 0;
+            if (!before || before.mode !== mode || (before.updatedAt || 0) !== at) changed = true;
+            try {
+                localStorage.setItem(POLICY_KEY + ':' + uid(), JSON.stringify({
+                    mode: mode, note: data.note || null, updatedAt: at, fetchedAt: Date.now()
+                }));
+            } catch (e) {}
+        }
+
+        // Only replace the floor-wide settings when the reply carried them.
+        // A missing key means the server couldn't read them; keep the cache.
+        if (Object.prototype.hasOwnProperty.call(data, 'global')) {
+            const g = data.global || {};
+            const next = {
+                suspendUntil: typeof g.suspendUntil === 'number' ? g.suspendUntil : 0,
+                forceMode:    (g.forceMode === 'on' || g.forceMode === 'off') ? g.forceMode : null,
+                forceUntil:   typeof g.forceUntil === 'number' ? g.forceUntil : 0,
+                updatedAt:    typeof g.updatedAt === 'number' ? g.updatedAt : 0
+            };
+            const before = globalCache();
+            if (!before || (before.updatedAt || 0) !== next.updatedAt) changed = true;
+            try { localStorage.setItem(GLOBAL_KEY, JSON.stringify(next)); } catch (e) {}
+        }
+
+        // Something new arrived: check in again in about five seconds so the
+        // dashboard can stop showing "Waiting for agent". Only happens on a
+        // change, so it costs one extra request per change.
+        if (changed) markCheckin(Date.now() - Math.max(0, CHECKIN_MS - 5000));
     }
 
     function checkin() {
@@ -655,7 +729,7 @@
             title  = 'Auto process is ' + lock.label + '.';
             cursor = 'not-allowed';
         } else if (lock && enabled) {
-            text   = lock.kind === 'policy' ? 'Auto process: on (required)'
+            text   = lock.kind !== 'schedule' ? 'Auto process: on (required)'
                                             : 'Auto process: on (scheduled)';
             color  = LOCK_COLOR;
             title  = 'Auto process is ' + lock.label +
