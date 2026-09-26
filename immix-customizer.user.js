@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.3.0
+// @version      3.4.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.3.0';
+    const SCRIPT_VERSION = '3.4.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -343,16 +343,26 @@
             case 'alarm_session':
                 d.alarms += 1;
                 d.alarmMs += Math.max(0, data.durationMs || 0);
+                hourAdd('alarms', 1);
+                hourAdd('alarmMs', Math.max(0, data.durationMs || 0));
                 break;
             case 'pickup':
                 if (data.mode === 'manual') {
                     d.manual += 1;
+                    hourAdd('manual', 1);
+                    // Idle in queue: how long an alarm waited before an agent
+                    // picked it up by hand, with auto process off.
+                    if (data.autoState === 'off' && typeof data.queueWaitMs === 'number' && data.queueWaitMs >= 0) {
+                        hourAdd('idleMs', data.queueWaitMs);
+                        hourAdd('idleN', 1);
+                    }
                     if (typeof data.queueWaitMs === 'number' && data.queueWaitMs >= 0) {
                         d.satMs += data.queueWaitMs;
                         d.satN  += 1;
                     }
                 } else {
                     d.auto += 1;
+                    hourAdd('auto', 1);
                 }
                 break;
             case 'toggle':
@@ -364,9 +374,11 @@
                 break;
             case 'override_blocked':
                 d.blocked += 1;
+                hourAdd('blocked', 1);
                 break;
             case 'stall':
                 d.stalls += 1;
+                hourAdd('stalls', 1);
                 d.lastStall = data.reasons || null;
                 d.lastStallAt = Date.now();
                 break;
@@ -374,6 +386,130 @@
                 return;   // everything else is not counted in lean mode
         }
         write('daily', d);
+        saveHours();   // measurements are infrequent, so store them straight away
+    }
+
+    /* ------------------------------------------------------------------
+       Hourly counters, for the shift report
+
+       Each clock hour gets its own small set of counters on this machine.
+       Once an hour is over, the next check-in carries it to the server, so
+       this adds no requests of its own and one row write per agent per hour.
+
+       Changes are collected in memory and merged into localStorage every
+       few seconds (and when the page is left), by adding rather than
+       overwriting, so reloads and a second tab can't wipe each other out.
+       A finished hour is kept for a few hours after it is sent; if anything
+       late lands in it, it is sent again with the corrected totals.
+    ------------------------------------------------------------------ */
+    const HOURS_KEY      = 'immixAutoProcess:hours';
+    const LAST_QUEUE_KEY = 'immixAutoProcess:lastQueueSize';
+    const HOURS_KEEP_MS  = 48 * 60 * 60 * 1000;   // give up on an hour never sent after this
+    const HOURS_SENT_KEEP_MS = 3 * 60 * 60 * 1000; // keep a sent hour this long for late additions
+    const HOURS_PER_CHECKIN = 6;
+
+    const HOUR_SUM_FIELDS = ['arrivals', 'alarms', 'alarmMs', 'auto', 'manual',
+                             'idleMs', 'idleN', 'onlineMs', 'autoOnMs', 'blocked', 'stalls'];
+
+    let hourDelta = {};   // hour key -> changes not yet merged into storage
+
+    function hourKey(ts) {
+        const d = new Date(ts);
+        const pad = function (n) { return (n < 10 ? '0' : '') + n; };
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours());
+    }
+
+    function hourStart(key) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})$/.exec(key);
+        return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4]).getTime() : 0;
+    }
+
+    function hourAdd(field, amount, ts) {
+        const k = hourKey(ts || Date.now());
+        const d = hourDelta[k] || (hourDelta[k] = {});
+        if (field === 'peak') d.peak = Math.max(d.peak || 0, amount);
+        else d[field] = (d[field] || 0) + amount;
+    }
+
+    function readHours() {
+        try { return JSON.parse(localStorage.getItem(HOURS_KEY) || '{}') || {}; } catch (e) { return {}; }
+    }
+
+    function saveHours() {
+        const keys = Object.keys(hourDelta);
+        if (!keys.length) return;
+        const all = readHours();
+        keys.forEach(function (k) {
+            const b = all[k] || (all[k] = { peak: 0, sentAt: 0, dirty: true });
+            const d = hourDelta[k];
+            HOUR_SUM_FIELDS.forEach(function (f) { if (d[f]) b[f] = (b[f] || 0) + d[f]; });
+            if (d.peak) b.peak = Math.max(b.peak || 0, d.peak);
+            b.dirty = true;
+        });
+        hourDelta = {};
+
+        // Drop hours that are long finished and either sent or hopeless.
+        const now = Date.now();
+        Object.keys(all).forEach(function (k) {
+            const age = now - hourStart(k);
+            if (age > HOURS_KEEP_MS || (all[k].sentAt && !all[k].dirty && age > HOURS_SENT_KEEP_MS)) delete all[k];
+        });
+        try { localStorage.setItem(HOURS_KEY, JSON.stringify(all)); } catch (e) {}
+    }
+
+    // Finished hours with anything the server hasn't got yet.
+    function hoursToSend() {
+        saveHours();
+        const all = readHours();
+        const current = hourKey(Date.now());
+        return Object.keys(all)
+            .filter(function (k) { return k < current && all[k].dirty; })
+            .sort()
+            .slice(0, HOURS_PER_CHECKIN)
+            .map(function (k) {
+                const b = all[k];
+                const out = { key: k, peak: b.peak || 0 };
+                HOUR_SUM_FIELDS.forEach(function (f) { out[f] = Math.round(b[f] || 0); });
+                return out;
+            });
+    }
+
+    function markHoursSent(keys) {
+        if (!keys || !keys.length) return;
+        const all = readHours();
+        keys.forEach(function (k) { if (all[k]) { all[k].dirty = false; all[k].sentAt = Date.now(); } });
+        try { localStorage.setItem(HOURS_KEY, JSON.stringify(all)); } catch (e) {}
+    }
+
+    // Called on every tick of the Alarm Monitor page.
+    let lastTickAt = 0;
+    let lastQueueSeen = null;
+    function hourlyTick(now, size) {
+        // Time on the page, and how much of it had auto process on. Gaps
+        // longer than a few seconds (a sleeping laptop) aren't counted.
+        if (lastTickAt) {
+            const dt = now - lastTickAt;
+            if (dt > 0 && dt < 5000) {
+                hourAdd('onlineMs', dt, now);
+                if (enabled) hourAdd('autoOnMs', dt, now);
+            }
+        }
+        lastTickAt = now;
+
+        // Alarms entering the queue: every rise in the queue counts. The last
+        // size is kept across page loads, so alarms that arrived while this
+        // agent was inside an alarm are caught when they come back.
+        if (lastQueueSeen === null) {
+            let stored = null;
+            try { stored = JSON.parse(localStorage.getItem(LAST_QUEUE_KEY) || 'null'); } catch (e) {}
+            lastQueueSeen = (stored && now - stored.at < 10 * 60 * 1000) ? stored.size : size;
+        }
+        if (size > lastQueueSeen) hourAdd('arrivals', size - lastQueueSeen, now);
+        if (size !== lastQueueSeen) {
+            lastQueueSeen = size;
+            try { localStorage.setItem(LAST_QUEUE_KEY, JSON.stringify({ size: size, at: now })); } catch (e) {}
+        }
+        hourAdd('peak', size, now);
     }
 
     /* ------------------------------------------------------------------
@@ -490,7 +626,8 @@
             blocked:       d.blocked,
             stalls:        d.stalls,
             lastStall:     d.lastStall,
-            lastStallAt:   d.lastStallAt
+            lastStallAt:   d.lastStallAt,
+            hours:         hoursToSend()
         });
     }
 
@@ -500,6 +637,8 @@
         if (!data) return;
 
         let changed = false;
+
+        if (Array.isArray(data.hours_saved)) markHoursSent(data.hours_saved);
 
         let mode;
         if (data.mode === 'on' || data.mode === 'off' || data.mode === null) mode = data.mode;
@@ -1062,6 +1201,7 @@
 
         const now = Date.now();
         const hasAlarm = queueHasAlarm();
+        hourlyTick(now, queueSize());
 
         // Queue just drained to zero - reset the "since last alarm" clock.
         if (prevHasAlarm === true && hasAlarm === false) {
@@ -1163,4 +1303,8 @@
     // second tick only reads a timestamp; the interval itself is CHECKIN_MS.
     checkinIfDue();
     setInterval(checkinIfDue, 5000);
+
+    // Hourly counters: merge into storage every few seconds and when the page is left.
+    setInterval(saveHours, 5000);
+    window.addEventListener('pagehide', saveHours);
 })();
