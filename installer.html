@@ -66,11 +66,25 @@
             line-height: 1.6;
         }
 
+        .section {
+            margin-bottom: 32px;
+        }
+
+        .section-title {
+            font-size: 13px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: #2a5298;
+            margin-bottom: 14px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #e8e8e8;
+        }
+
         .scripts-grid {
             display: grid;
             grid-template-columns: 1fr;
             gap: 16px;
-            margin-bottom: 24px;
         }
 
         .script-card {
@@ -200,64 +214,87 @@
             <p>Security tools for your Immix workflow.<br>Tampermonkey must be installed first.</p>
         </div>
 
-        <div class="scripts-grid">
-            <div class="script-card">
-                <div class="script-icon">🔍</div>
-                <h3>Auto Details</h3>
-                <p>Opens the site details panel automatically once an event finishes loading.</p>
-                <div class="actions">
-                    <button class="copy-btn" type="button"
-                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/auto_details_2.user.js">Copy link</button>
+        <div class="section">
+            <div class="section-title">Required</div>
+            <div class="scripts-grid">
+                <div class="script-card">
+                    <div class="script-icon">🏃🏽‍➡️</div>
+                    <h3>Auto Process</h3>
+                    <p>Picks up alarms from the queue automatically.</p>
+                    <div class="actions">
+                        <button class="copy-btn" type="button"
+                                data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.user.js">Copy link</button>
+                    </div>
+                </div>
+
+                <div class="script-card">
+                    <div class="script-icon">⌨️</div>
+                    <h3>IncidentCode_Check</h3>
+                    <p>Checks that images and comments are uploaded to incidentcode before closing.</p>
+                    <div class="actions">
+                        <button class="copy-btn" type="button"
+                                data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-incidentcode-check_v101%20(1).user.js">Copy link</button>
+                    </div>
+                </div>
+
+                <div class="script-card">
+                    <div class="script-icon">🔍</div>
+                    <h3>Auto Details</h3>
+                    <p>Opens the site details panel automatically once an event finishes loading.</p>
+                    <div class="actions">
+                        <button class="copy-btn" type="button"
+                                data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/auto_details_2.user.js">Copy link</button>
+                    </div>
                 </div>
             </div>
+        </div>
 
-            <div class="script-card">
-                <div class="script-icon">⚠️</div>
-                <h3>Quick Audit</h3>
-                <p>Speeds up auditing events.</p>
-                <div class="actions">
-                    <button class="copy-btn" type="button"
-                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Quick_Audit_v4.user.js">Copy link</button>
+        <div class="section">
+            <div class="section-title">Audit Tools</div>
+            <div class="scripts-grid">
+                <div class="script-card">
+                    <div class="script-icon">⚠️</div>
+                    <h3>Quick Audit</h3>
+                    <p>Speeds up auditing events.</p>
+                    <div class="actions">
+                        <button class="copy-btn" type="button"
+                                data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Quick_Audit_v4.user.js">Copy link</button>
+                    </div>
+                </div>
+
+                <div class="script-card">
+                    <div class="script-icon">🚨</div>
+                    <h3>IncidentCode Auditor</h3>
+                    <p>Tool for auditing incident codes</p>
+                    <div class="actions">
+                        <button class="copy-btn" type="button"
+                                data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/incident-range-scraper-v5_user.js">Copy link</button>
+                    </div>
                 </div>
             </div>
+        </div>
 
-            <div class="script-card">
-                <div class="script-icon">❤️‍🔥</div>
-                <h3>Hotkeys</h3>
-                <p>Numpad hotkey editor for common actions.</p>
-                <div class="actions">
-                    <button class="copy-btn" type="button"
-                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/EyeQ_Numpad_HK_v106.user.js">Copy link</button>
+        <div class="section">
+            <div class="section-title">Extra Tools</div>
+            <div class="scripts-grid">
+                <div class="script-card">
+                    <div class="script-icon">❤️‍🔥</div>
+                    <h3>Hotkeys</h3>
+                    <p>Numpad hotkey editor for common actions.</p>
+                    <div class="actions">
+                        <button class="copy-btn" type="button"
+                                data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/EyeQ_Numpad_HK_v106.user.js">Copy link</button>
+                    </div>
                 </div>
-            </div>
 
-            <div class="script-card">
-                <div class="script-icon">🏃🏽‍➡️</div>
-                <h3>Auto Process</h3>
-                <p>Picks up alarms from the queue automatically.</p>
-                <div class="actions">
-                    <button class="copy-btn" type="button"
-                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.user.js">Copy link</button>
-                </div>
-            </div>
-
-            <div class="script-card">
-                <div class="script-icon">⌨️</div>
-                <h3>IncidentCode_Check</h3>
-                <p>Checks that images and comments are uploaded to incidentcode before closing.</p>
-                <div class="actions">
-                    <button class="copy-btn" type="button"
-                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-incidentcode-check_v101%20(1).user.js">Copy link</button>
-                </div>
-            </div>
-
-            <div class="script-card">
-                <div class="script-icon">🗺️</div>
-                <h3>Mapfinder</h3>
-                <p>Adds a button under the site address that opens Google Maps and a non-emergency police number search in one click.</p>
-                <div class="actions">
-                    <button class="copy-btn" type="button"
-                            data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Mapfinderv1.user.js">Copy link</button>
+                <div class="script-card">
+                    <div class="script-icon">🗺️</div>
+                    <h3>Mapfinder</h3>
+                    <p>Adds a button under the site address that opens Google Maps and a non-emergency police number search in one click.</p>
+                    <div class="actions">
+                        <button class="copy-btn" type="button"
+                                data-url="https://raw.githubusercontent.com/socscripts/soc-scripts/main/Mapfinderv1.user.js">Copy link</button>
+                    </div>
                 </div>
             </div>
         </div>
