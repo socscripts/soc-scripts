@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         Immix Activity Tracker
 // @namespace    immix-tracker
-// @version      1.0.1
+// @version      1.0.2
 // @description  Records alarm activity and time on the Alarm Monitor page for a browser that does NOT run auto process. Never picks up an alarm. Stands down automatically if the auto process script is running in the same browser.
 // @author       -
 // @match        *://newapp.smartviewplus.com/AlarmMonitor.aspx*
 // @match        *://newapp.smartviewplus.com/SiteMonitor.aspx*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
+// @connect      immix-telemetry.soc-autoprocess.workers.dev
 // @connect      immix-telemetry.jdale-e67.workers.dev
+// @updateURL    https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-tracker.user.js
+// @downloadURL  https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-tracker.user.js
 // ==/UserScript==
 
 /*
@@ -47,12 +50,21 @@
 
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '1.0.1';
+    const SCRIPT_VERSION = '1.0.2';
 
     /* ------------------------------------------------------------------
        Settings
     ------------------------------------------------------------------ */
-    const TELEMETRY_BASE = 'https://immix-telemetry.jdale-e67.workers.dev';
+    // The first address is the one in use; the second is kept so this script
+    // keeps working either side of a subdomain change, because the old
+    // workers.dev address stops answering the moment the account subdomain is
+    // renamed. Whichever answers is remembered, so the fallback costs an
+    // extra request only when the first one is unreachable.
+    const TELEMETRY_BASES = [
+        'https://immix-telemetry.soc-autoprocess.workers.dev',
+        'https://immix-telemetry.jdale-e67.workers.dev'
+    ];
+    const BASE_KEY = 'immixTracker:telemetryBase';
     const TELEMETRY_KEY  = '7kR9mQ2xL8pT5nV4cW6hJ3fD1bS8yA9eG0uZ';
 
     // How often this browser reports. The dashboard treats a tracker as gone
@@ -382,8 +394,26 @@
                       ' - no response. If this browser is otherwise working, the request was most likely blocked.'));
     }
 
-    function send(payload) {
-        const url = TELEMETRY_BASE + '/tracker';
+    function telemetryBase() {
+        const saved = readJson(BASE_KEY, null);
+        return (saved && TELEMETRY_BASES.indexOf(saved) !== -1) ? saved : TELEMETRY_BASES[0];
+    }
+    // Only an unreachable host is worth trying elsewhere. A refused key or a
+    // server error means the right host answered and had something to say.
+    function otherBase(base) {
+        const i = TELEMETRY_BASES.indexOf(base);
+        return i === -1 ? null : (TELEMETRY_BASES[(i + 1) % TELEMETRY_BASES.length] || null);
+    }
+
+    function send(payload, base, allowRetry) {
+        base = base || telemetryBase();
+        if (allowRetry === undefined) allowRetry = true;
+        const url = base + '/tracker';
+        const unreachable = function () {
+            const next = allowRetry ? otherBase(base) : null;
+            if (next) { send(payload, next, false); return; }
+            done(0, '');
+        };
         // GM_xmlhttpRequest is outside the page, so the Immix page's content
         // security policy does not apply to it.
         if (typeof GM_xmlhttpRequest === 'function') {
@@ -393,17 +423,17 @@
                 headers: { 'Content-Type': 'application/json', 'X-Api-Key': TELEMETRY_KEY },
                 data: payload,
                 timeout: 20000,
-                onload: function (r) { done(r.status, r.responseText); },
-                onerror: function () { done(0, ''); },
-                ontimeout: function () { done(0, ''); }
+                onload: function (r) { writeJson(BASE_KEY, base); done(r.status, r.responseText); },
+                onerror: unreachable,
+                ontimeout: unreachable
             });
             return;
         }
         // Fallback for an install where the grant did not take effect. It may
         // be blocked by the page, which is what the console message is for.
         fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': TELEMETRY_KEY }, body: payload })
-            .then(function (r) { return r.text().then(function (t) { done(r.status, t); }); })
-            .catch(function () { done(0, ''); });
+            .then(function (r) { writeJson(BASE_KEY, base); return r.text().then(function (t) { done(r.status, t); }); })
+            .catch(unreachable);
     }
 
     /* ------------------------------------------------------------------
