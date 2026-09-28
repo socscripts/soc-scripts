@@ -1,19 +1,19 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.4.0
+// @version      3.4.1
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
 // @match        https://newapp.smartviewplus.com/SiteMonitor.aspx*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
+// @connect      immix-telemetry.soc-autoprocess.workers.dev
 // @connect      immix-telemetry.jdale-e67.workers.dev
-// Auto-update is OFF until the file is hosted. Once it has a permanent URL,
-// restore the two lines below (remove the leading "x-" from each) so every
-// agent picks up future changes automatically:
-// x-updateURL    https://YOUR-HOST/immix-autoprocess.user.js
-// x-downloadURL  https://YOUR-HOST/immix-autoprocess.user.js
+// Auto-update is ON. Tampermonkey checks the link below and installs any
+// version higher than this one, so agents pick up changes on their own.
+// @updateURL    https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.user.js
+// @downloadURL  https://raw.githubusercontent.com/socscripts/soc-scripts/main/immix-customizer.user.js
 // ==/UserScript==
 
 (function () {
@@ -240,7 +240,33 @@
        the next one carries the same totals.
     ================================================================== */
     const TELEMETRY_ENABLED = true;
-    const TELEMETRY_BASE    = 'https://immix-telemetry.jdale-e67.workers.dev';
+    // The Worker's address. The first entry is the one in use; the second is
+    // kept so this script keeps working either side of a subdomain change,
+    // because the old workers.dev address stops answering the moment the
+    // account subdomain is renamed. Whichever answers is remembered, so the
+    // fallback costs an extra request only when the first one is unreachable.
+    const TELEMETRY_BASES   = [
+        'https://immix-telemetry.soc-autoprocess.workers.dev',
+        'https://immix-telemetry.jdale-e67.workers.dev'
+    ];
+    const BASE_KEY = 'immixAutoProcess:telemetryBase';
+
+    function telemetryBase() {
+        try {
+            const saved = localStorage.getItem(BASE_KEY);
+            if (saved && TELEMETRY_BASES.indexOf(saved) !== -1) return saved;
+        } catch (e) {}
+        return TELEMETRY_BASES[0];
+    }
+    function rememberBase(base) {
+        try { localStorage.setItem(BASE_KEY, base); } catch (e) {}
+    }
+    // Only an unreachable host is worth retrying elsewhere. A refused key or
+    // a server error means the right host answered and had something to say.
+    function otherBase(base) {
+        const i = TELEMETRY_BASES.indexOf(base);
+        return i === -1 ? null : (TELEMETRY_BASES[(i + 1) % TELEMETRY_BASES.length] || null);
+    }
     const TELEMETRY_KEY     = '7kR9mQ2xL8pT5nV4cW6hJ3fD1bS8yA9eG0uZ';
 
     // How often each agent checks in. This is also how quickly a Force on
@@ -685,27 +711,38 @@
         // the next few seconds does not send a duplicate.
         markCheckin(Date.now());
 
-        const url  = TELEMETRY_BASE + '/checkin';
         const body = checkinBody();
         const headers = { 'Content-Type': 'application/json', 'X-Api-Key': TELEMETRY_KEY };
 
-        if (typeof GM_xmlhttpRequest === 'function') {
-            GM_xmlhttpRequest({
-                method: 'POST', url: url, headers: headers, data: body, timeout: 15000,
-                onload: function (r) {
-                    // Only a 200 carries a trustworthy policy. Anything else,
-                    // including the free-tier limit being reached, keeps the cache.
-                    if (r.status >= 200 && r.status < 300) applyPolicyReply(r.responseText);
-                },
-                onerror: function () {}, ontimeout: function () {}
-            });
-            return;
+        function attempt(base, allowRetry) {
+            const url = base + '/checkin';
+
+            function unreachable() {
+                const next = allowRetry ? otherBase(base) : null;
+                if (next) attempt(next, false);
+            }
+
+            if (typeof GM_xmlhttpRequest === 'function') {
+                GM_xmlhttpRequest({
+                    method: 'POST', url: url, headers: headers, data: body, timeout: 15000,
+                    onload: function (r) {
+                        rememberBase(base);
+                        // Only a 200 carries a trustworthy policy. Anything else,
+                        // including the free-tier limit being reached, keeps the cache.
+                        if (r.status >= 200 && r.status < 300) applyPolicyReply(r.responseText);
+                    },
+                    onerror: unreachable, ontimeout: unreachable
+                });
+                return;
+            }
+            try {
+                fetch(url, { method: 'POST', headers: headers, body: body })
+                    .then(function (r) { rememberBase(base); return r.ok ? r.text() : null; })
+                    .then(function (t) { if (t) applyPolicyReply(t); }, unreachable);
+            } catch (e) { unreachable(); }
         }
-        try {
-            fetch(url, { method: 'POST', headers: headers, body: body })
-                .then(function (r) { return r.ok ? r.text() : null; })
-                .then(function (t) { if (t) applyPolicyReply(t); }, function () {});
-        } catch (e) {}
+
+        attempt(telemetryBase(), true);
     }
 
     // Called on the scheduler tick; sends only when an interval has passed.
