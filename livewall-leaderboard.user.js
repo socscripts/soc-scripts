@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Livewall Leaderboard
 // @namespace    livewall-leaderboard
-// @version      1.0.0
+// @version      1.2.0
 // @description  Restyles the Livewall queue status page and adds a top-3 performers panel fed by the Immix telemetry Worker.
 // @author       -
 // @match        file:///*queue-status.html*
@@ -22,7 +22,7 @@
  *  still reads the four numbers from the local server every second and
  *  still colors each box. This script only changes how the page looks and
  *  adds a panel on the right showing the top three agents of the shift so
- *  far, rotating between share of workload, time to close vs peers, and
+ *  far, rotating between alarms per hour, time to close vs peers, and
  *  alarms handled.
  *
  *  The leaderboard comes from the Worker's read-only /api/leaderboard
@@ -36,7 +36,7 @@
 (function () {
     'use strict';
 
-    const LEADERBOARD_KEY = 'PASTE_LEADERBOARD_KEY_HERE';
+    const LEADERBOARD_KEY = 'P@ssword1';
     const BASES = [
         'https://immix-telemetry.soc-autoprocess.workers.dev',
         'https://immix-telemetry.jdale-e67.workers.dev'
@@ -47,7 +47,7 @@
     const COLORS = { ok: '#3DD68C', warn: '#FF801F', crit: '#DC3E42' };
 
     const VIEWS = [
-        { key: 'share',  label: 'Share of workload',      overline: function (d) { return 'SHARE OF WORKLOAD \u00b7 100% = EVEN SPLIT' + through(d); } },
+        { key: 'rate',   label: 'Alarms per hour',        overline: function (d) { return 'ALARMS PER HOUR WORKED' + (d && d.floor_rate !== null && d.floor_rate !== undefined ? ' \u00b7 FLOOR AVG ' + d.floor_rate.toFixed(1) : '') + through(d); } },
         { key: 'close',  label: 'Time to close vs peers', overline: function (d) { return 'AVERAGE TIME TO CLOSE' + (d && d.floor_close ? ' \u00b7 FLOOR AVG ' + d.floor_close : '') + through(d); } },
         { key: 'alarms', label: 'Alarms handled',         overline: function () { return 'ALARMS HANDLED \u00b7 SHIFT SO FAR'; } }
     ];
@@ -83,10 +83,13 @@
     }
     .mainContainer > .grid-item .contentDiv {
         font-family: 'Geist Mono', Consolas, monospace; font-weight: 600;
-        font-size: 9.6vh; letter-spacing: -0.15vh; color: var(--lw-state, #FAFAFA);
+        /* Sized by width as well as height: a time is 8 characters wide and
+           each box is only a quarter of the screen across. */
+        font-size: min(9vh, 3.9vw); letter-spacing: 0; color: var(--lw-state, #FAFAFA);
         display: flex; align-items: center; justify-content: center;
+        padding: 0 1.5vw; box-sizing: border-box; white-space: nowrap;
     }
-    #eventsInQueue { font-size: 13vh !important; }
+    #eventsInQueue { font-size: min(13vh, 8vw) !important; }
     .lw-status {
         position: absolute; left: 0; right: 0; bottom: 3.2vh; z-index: 1;
         display: flex; align-items: center; justify-content: center; gap: .6vw;
@@ -107,21 +110,22 @@
     .lw-into { font-size: 1.5vh; color: #A3A3A3; margin-top: .6vh; }
     .lw-bar { height: .6vh; background: #262626; border-radius: 9999px; overflow: hidden; }
     .lw-bar > div { height: 100%; width: 0; background: #0090FF; border-radius: 9999px; }
-    .lw-podium { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: .85vw; align-items: end; }
-    .lw-card { background: #262626; border-radius: 14px; padding: 2.6vh 1.25vw; box-sizing: border-box;
-               display: flex; flex-direction: column; justify-content: space-between; min-width: 0; }
-    .lw-card.p1 { background: #0369A1; height: 100%; }
-    .lw-card.p2 { height: 78%; }
-    .lw-card.p3 { height: 64%; }
-    .lw-place { font-family: 'Geist Mono', Consolas, monospace; font-size: 2.4vh; color: #A3A3A3; }
-    .lw-card.p1 .lw-place, .lw-card.p1 .lw-note { color: #E0F2FE; }
-    .lw-name { font-family: Geist, Inter, sans-serif; font-weight: 600; font-size: 3vh;
+    .lw-podium { flex: 1; min-height: 0; display: grid; grid-template-rows: 1.25fr 1fr 1fr; gap: 1.3vh; }
+    .lw-row { display: grid; grid-template-columns: 6.8vw 1fr 15.6vw; gap: .75vw; min-height: 0; }
+    .lw-row > div { border-radius: 12px; display: flex; align-items: center; min-width: 0; }
+    .lw-rank { background: #262626; justify-content: center; font-family: 'Geist Mono', Consolas, monospace;
+               font-weight: 600; font-size: min(6.7vh, 3.5vw); color: #D4D4D4; }
+    .lw-row.r1 .lw-rank { background: #0369A1; color: #FAFAFA; font-size: min(8.1vh, 4.3vw); }
+    .lw-who { background: #262626; padding: 0 1.5vw; flex-direction: column; align-items: flex-start !important;
+              justify-content: center; gap: .8vh; }
+    .lw-name { font-family: Geist, Inter, sans-serif; font-weight: 600; font-size: min(3.7vh, 2vw); max-width: 100%;
                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .lw-card.p1 .lw-name { font-weight: 700; font-size: 3.5vh; }
-    .lw-value { font-family: 'Geist Mono', Consolas, monospace; font-weight: 600; font-size: 5.2vh; margin: .9vh 0; }
-    .lw-card.p1 .lw-value { font-size: 6.7vh; }
-    .lw-card.p3 .lw-value { font-size: 4.6vh; }
-    .lw-note { font-size: 1.7vh; color: #A3A3A3; }
+    .lw-row.r1 .lw-name { font-weight: 700; font-size: min(4.4vh, 2.4vw); }
+    .lw-lead { font-size: 1.9vh; color: #3DD68C; font-weight: 500; }
+    .lw-score { background: #0A0A0A; border: 1px solid #404040; justify-content: center; padding: 0 .8vw;
+                font-family: 'Geist Mono', Consolas, monospace; font-weight: 600; font-size: min(7vh, 3.7vw);
+                white-space: nowrap; }
+    .lw-row.r1 .lw-score { font-size: min(8.9vh, 4.6vw); }
     .lw-empty { grid-column: 1 / -1; align-self: center; text-align: center; font-size: 2.4vh; color: #A3A3A3; }
     .lw-tabs { display: flex; gap: .5vw; }
     .lw-tab { flex: 1; min-height: 4.4vh; border-radius: 9999px; border: 1px solid #404040; background: transparent;
@@ -227,6 +231,20 @@
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
+    // The gap between 1st and 2nd, shown on the 1st place row only.
+    function leadText(key, rows) {
+        if (rows.length < 2 || typeof rows[0].n !== 'number' || typeof rows[1].n !== 'number') return '';
+        const a = rows[0].n, b = rows[1].n;
+        if (key === 'rate') { const g = Math.round((a - b) * 10) / 10; return g > 0 ? 'Leading by ' + g.toFixed(1) + ' per hour' : ''; }
+        if (key === 'alarms') { const g = a - b; return g > 0 ? 'Leading by ' + g + (g === 1 ? ' alarm' : ' alarms') : ''; }
+        if (key === 'close') {
+            // Ranked against peers, so 1st is not always the fastest raw time.
+            const g = b - a;
+            return g > 0 ? 'Leading by ' + Math.floor(g / 60) + ':' + (g % 60 < 10 ? '0' : '') + (g % 60) + ' per alarm' : (rows[0].note || '');
+        }
+        return '';
+    }
+
     function render() {
         const sh = localShift(new Date());
         const v = VIEWS[view];
@@ -246,14 +264,12 @@
                                 : 'Available after the first full hour of the shift');
             html = '<div class="lw-empty">' + msg + '</div>';
         } else {
-            // Podium order: 2nd, 1st, 3rd.
-            [[1, 'p2', '2nd'], [0, 'p1', '1st'], [2, 'p3', '3rd']].forEach(function (p) {
-                const r = rows[p[0]];
-                if (!r) { html += '<div></div>'; return; }
-                html += '<div class="lw-card ' + p[1] + '"><div class="lw-place">' + p[2] + '</div><div>' +
-                        '<div class="lw-name">' + esc(r.name) + '</div>' +
-                        '<div class="lw-value">' + esc(r.value) + '</div>' +
-                        '<div class="lw-note">' + esc(r.note) + '</div></div></div>';
+            rows.forEach(function (r, i) {
+                const lead = i === 0 ? leadText(v.key, rows) : '';
+                html += '<div class="lw-row r' + (i + 1) + '"><div class="lw-rank">' + (i + 1) + '</div>' +
+                        '<div class="lw-who"><div class="lw-name">' + esc(r.name) + '</div>' +
+                        (lead ? '<div class="lw-lead">' + esc(lead) + '</div>' : '') + '</div>' +
+                        '<div class="lw-score">' + esc(r.value) + '</div></div>';
             });
         }
         $('lwPodium').innerHTML = html;
@@ -324,5 +340,5 @@
     render();
     load();
     setInterval(load, POLL_MS);
-    console.log('[Livewall] leaderboard ' + '1.0.0' + ' running; refreshing every ' + (POLL_MS / 60000) + ' minutes.');
+    console.log('[Livewall] leaderboard ' + '1.2.0' + ' running; refreshing every ' + (POLL_MS / 60000) + ' minutes.');
 })();
