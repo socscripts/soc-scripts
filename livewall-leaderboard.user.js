@@ -36,7 +36,7 @@
 (function () {
     'use strict';
 
-    const LEADERBOARD_KEY = 'PASTE_LEADERBOARD_KEY_HERE';
+    const LEADERBOARD_KEY = 'P@ssword1';
     const BASES = [
         'https://immix-telemetry.soc-autoprocess.workers.dev',
         'https://immix-telemetry.jdale-e67.workers.dev'
