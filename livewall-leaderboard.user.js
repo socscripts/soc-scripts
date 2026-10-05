@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Livewall Leaderboard
 // @namespace    livewall-leaderboard
-// @version      1.2.0
+// @version      1.3.0
 // @description  Restyles the Livewall queue status page and adds a top-3 performers panel fed by the Immix telemetry Worker.
 // @author       -
 // @match        file:///*queue-status.html*
@@ -36,7 +36,7 @@
 (function () {
     'use strict';
 
-    const LEADERBOARD_KEY = 'P@ssword1';
+    const LEADERBOARD_KEY = 'PASTE_LEADERBOARD_KEY_HERE';
     const BASES = [
         'https://immix-telemetry.soc-autoprocess.workers.dev',
         'https://immix-telemetry.jdale-e67.workers.dev'
@@ -52,7 +52,12 @@
         { key: 'alarms', label: 'Alarms handled',         overline: function () { return 'ALARMS HANDLED \u00b7 SHIFT SO FAR'; } }
     ];
 
-    function through(d) { return d && d.through ? ' \u00b7 THROUGH ' + d.through : ''; }
+    // In a shift's first hour the Worker sends the previous shift's figures
+    // for the two hour-based stats and names that shift in hourly_from.
+    function through(d) {
+        if (d && d.hourly_from) return ' \u00b7 LAST SHIFT (' + d.hourly_from.toUpperCase() + ')';
+        return d && d.through ? ' \u00b7 THROUGH ' + d.through : '';
+    }
 
     /* ------------------------------------------------------------------ styles */
 
@@ -340,5 +345,5 @@
     render();
     load();
     setInterval(load, POLL_MS);
-    console.log('[Livewall] leaderboard ' + '1.2.0' + ' running; refreshing every ' + (POLL_MS / 60000) + ' minutes.');
+    console.log('[Livewall] leaderboard ' + '1.3.0' + ' running; refreshing every ' + (POLL_MS / 60000) + ' minutes.');
 })();
