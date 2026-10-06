@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Livewall Leaderboard
 // @namespace    livewall-leaderboard
-// @version      1.3.0
+// @version      1.3.1
 // @description  Restyles the Livewall queue status page and adds a top-3 performers panel fed by the Immix telemetry Worker.
 // @author       -
 // @match        file:///*queue-status.html*
