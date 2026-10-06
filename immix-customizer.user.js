@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.4.1
+// @version      3.5.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -657,6 +657,127 @@
         });
     }
 
+    /* --------------------------------------------------------------
+       Supervisor's queue filter
+
+       A supervisor can narrow this agent's alarm queue from the dashboard
+       between 11 PM and 5 AM: one priority, and oldest or newest first.
+
+       There is deliberately NO interface here. No panel, no menu command,
+       no hotkey, nothing in the page an agent can open or discover. The
+       only way a filter arrives is in the reply to a check-in, and the
+       Worker refuses to store one outside those hours. An agent cannot
+       filter their own queue with this script.
+
+       It hides and reorders rows for display only. The page's own pickup
+       always takes the alarm at the head of the real queue, which is why a
+       filter arrives together with auto process forced off: the agent opens
+       one of the alarms they can see by clicking its row.
+    -------------------------------------------------------------- */
+
+    const FILTER_KEY = 'immixAutoProcess:queueFilter';
+    const FILTER_HIDE_CLASS = 'ap-qf-hide';
+
+    function parseFilter(v) {
+        if (!v) return null;
+        let f = v;
+        if (typeof f === 'string') { try { f = JSON.parse(f); } catch (e) { return null; } }
+        if (!f || typeof f !== 'object') return null;
+        const prio = (f.prio === null || f.prio === undefined) ? null : String(f.prio);
+        const sort = (f.sort === 'oldest' || f.sort === 'newest') ? f.sort : 'queue';
+        if (!prio && sort === 'queue') return null;
+        return { prio: prio, sort: sort };
+    }
+
+    function sameFilter(a, b) {
+        const x = a || { prio: null, sort: 'queue' }, y = b || { prio: null, sort: 'queue' };
+        return x.prio === y.prio && x.sort === y.sort;
+    }
+
+    function filterState() {
+        try { return parseFilter(localStorage.getItem(FILTER_KEY)); } catch (e) { return null; }
+    }
+
+    // Which column holds the priority, read from the table's own headings.
+    function prioColumn() {
+        const heads = document.querySelectorAll('.eventsAlarmsContainer th, .eventsAlarmsContainer thead td');
+        for (let i = 0; i < heads.length; i++) {
+            const t = (heads[i].textContent || '').trim().toLowerCase();
+            if (t === 'priority') return heads[i].cellIndex;
+        }
+        return 3;   // the usual position when the headings cannot be read
+    }
+
+    function rowPrio(row, col) {
+        const cell = row.cells && row.cells[col];
+        const m = cell ? /\d+/.exec(cell.textContent || '') : null;
+        return m ? m[0] : null;
+    }
+
+    function rowTime(row) {
+        const cell = row.cells && row.cells[0];
+        const t = cell ? Date.parse((cell.textContent || '').trim()) : NaN;
+        return t;
+    }
+
+    function queueRows() {
+        const body = document.getElementById('alarmTable');
+        return body ? Array.prototype.slice.call(body.querySelectorAll('tr')) : [];
+    }
+
+    function clearQueueFilter() {
+        queueRows().forEach(function (r) { r.classList.remove(FILTER_HIDE_CLASS); });
+        // Order restores by itself: the page redraws the table every couple
+        // of seconds in its own order.
+    }
+
+    function applyQueueFilter() {
+        const f = filterState();
+        const rows = queueRows();
+        if (!rows.length) return;
+        if (!f) { clearQueueFilter(); return; }
+
+        if (f.prio) {
+            const col = prioColumn();
+            rows.forEach(function (r) {
+                const p = rowPrio(r, col);
+                if (p !== null && p !== f.prio) r.classList.add(FILTER_HIDE_CLASS);
+                else r.classList.remove(FILTER_HIDE_CLASS);
+            });
+        } else {
+            rows.forEach(function (r) { r.classList.remove(FILTER_HIDE_CLASS); });
+        }
+
+        if (f.sort === 'oldest' || f.sort === 'newest') {
+            const parent = rows[0].parentNode;
+            const want = rows.slice().sort(function (a, b) {
+                const ta = rowTime(a), tb = rowTime(b);
+                if (isNaN(ta) || isNaN(tb) || ta === tb) return 0;
+                return f.sort === 'oldest' ? ta - tb : tb - ta;
+            });
+            let moved = false;
+            for (let i = 0; i < want.length; i++) { if (want[i] !== rows[i]) { moved = true; break; } }
+            if (moved) {
+                const frag = document.createDocumentFragment();
+                want.forEach(function (r) { frag.appendChild(r); });
+                parent.appendChild(frag);
+            }
+        }
+    }
+
+    function startQueueFilter() {
+        const style = document.createElement('style');
+        style.textContent = '.' + FILTER_HIDE_CLASS + ' { display: none !important; }';
+        document.head.appendChild(style);
+
+        // The page redraws the queue every couple of seconds. Reapplying before
+        // the browser paints stops hidden rows flashing up in between.
+        const box = document.querySelector('.eventsAlarmsContainer');
+        if (box) new MutationObserver(applyQueueFilter).observe(box, { childList: true, subtree: true });
+        setInterval(applyQueueFilter, 2000);
+        applyQueueFilter();
+    }
+
     function applyPolicyReply(text) {
         let data;
         try { data = JSON.parse(text); } catch (e) { return; }
@@ -669,6 +790,21 @@
         let mode;
         if (data.mode === 'on' || data.mode === 'off' || data.mode === null) mode = data.mode;
         else if (typeof data.force_on === 'boolean') mode = data.force_on ? 'on' : null;
+
+        // The supervisor's queue filter. The reply always carries the key, so a
+        // missing one means an older Worker: leave whatever is cached alone.
+        if (Object.prototype.hasOwnProperty.call(data, 'filter')) {
+            const next = parseFilter(data.filter);
+            const before = filterState();
+            if (!sameFilter(before, next)) {
+                changed = true;
+                try {
+                    if (next) localStorage.setItem(FILTER_KEY, JSON.stringify(next));
+                    else localStorage.removeItem(FILTER_KEY);
+                } catch (e) {}
+                applyQueueFilter();
+            }
+        }
 
         if (mode !== undefined) {
             const before = policyCache();
@@ -1334,6 +1470,7 @@
     createButton();
     createPanel();
     hookProcessAlarm();
+    startQueueFilter();   // does nothing unless a supervisor has set a filter
     setInterval(tick, POLL_MS);
 
     // Check in once the page state exists, then on the schedule. The five
