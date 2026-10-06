@@ -36,7 +36,7 @@
 (function () {
     'use strict';
 
-    const LEADERBOARD_KEY = 'P@ssword1';
+    const LEADERBOARD_KEY = 'PASTE_LEADERBOARD_KEY_HERE';
     const BASES = [
         'https://immix-telemetry.soc-autoprocess.workers.dev',
         'https://immix-telemetry.jdale-e67.workers.dev'
@@ -47,9 +47,9 @@
     const COLORS = { ok: '#3DD68C', warn: '#FF801F', crit: '#DC3E42' };
 
     const VIEWS = [
-        { key: 'rate',   label: 'Alarms per hour',        overline: function (d) { return 'ALARMS PER HOUR WORKED' + (d && d.floor_rate !== null && d.floor_rate !== undefined ? ' \u00b7 FLOOR AVG ' + d.floor_rate.toFixed(1) : '') + through(d); } },
+        { key: 'rate',   label: 'Events per hour',        overline: function (d) { return 'EVENTS PER HOUR WORKED' + (d && d.floor_rate !== null && d.floor_rate !== undefined ? ' \u00b7 FLOOR AVG ' + d.floor_rate.toFixed(1) : '') + through(d); } },
         { key: 'close',  label: 'Time to close vs peers', overline: function (d) { return 'AVERAGE TIME TO CLOSE' + (d && d.floor_close ? ' \u00b7 FLOOR AVG ' + d.floor_close : '') + through(d); } },
-        { key: 'alarms', label: 'Alarms handled',         overline: function () { return 'ALARMS HANDLED \u00b7 SHIFT SO FAR'; } }
+        { key: 'alarms', label: 'Events handled',         overline: function () { return 'EVENTS HANDLED \u00b7 SHIFT SO FAR'; } }
     ];
 
     // In a shift's first hour the Worker sends the previous shift's figures
@@ -241,11 +241,11 @@
         if (rows.length < 2 || typeof rows[0].n !== 'number' || typeof rows[1].n !== 'number') return '';
         const a = rows[0].n, b = rows[1].n;
         if (key === 'rate') { const g = Math.round((a - b) * 10) / 10; return g > 0 ? 'Leading by ' + g.toFixed(1) + ' per hour' : ''; }
-        if (key === 'alarms') { const g = a - b; return g > 0 ? 'Leading by ' + g + (g === 1 ? ' alarm' : ' alarms') : ''; }
+        if (key === 'alarms') { const g = a - b; return g > 0 ? 'Leading by ' + g + (g === 1 ? ' event' : ' events') : ''; }
         if (key === 'close') {
             // Ranked against peers, so 1st is not always the fastest raw time.
             const g = b - a;
-            return g > 0 ? 'Leading by ' + Math.floor(g / 60) + ':' + (g % 60 < 10 ? '0' : '') + (g % 60) + ' per alarm' : (rows[0].note || '');
+            return g > 0 ? 'Leading by ' + Math.floor(g / 60) + ':' + (g % 60 < 10 ? '0' : '') + (g % 60) + ' per event' : (rows[0].note || '');
         }
         return '';
     }
@@ -264,7 +264,7 @@
         if (!rows) {
             html = '<div class="lw-empty">' + esc(lastError || 'Loading\u2026') + '</div>';
         } else if (!rows.length) {
-            const msg = v.key === 'alarms' ? 'No alarms handled yet this shift'
+            const msg = v.key === 'alarms' ? 'No events handled yet this shift'
                 : (data.through ? 'Not enough finished work yet to compare'
                                 : 'Available after the first full hour of the shift');
             html = '<div class="lw-empty">' + msg + '</div>';
