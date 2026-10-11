@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.5.0
+// @version      3.8.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.4.0';
+    const SCRIPT_VERSION = '3.8.0';   // was reported as 3.4.0 by mistake before 3.8
 
     /* ------------------------------------------------------------------
        Settings
@@ -653,7 +653,9 @@
             stalls:        d.stalls,
             lastStall:     d.lastStall,
             lastStallAt:   d.lastStallAt,
-            hours:         hoursToSend()
+            hours:         hoursToSend(),
+            // Hidden auto-disarm: banked closures and any disarm results to report.
+            ...adCheckinExtras()
         });
     }
 
@@ -817,6 +819,12 @@
             } catch (e) {}
         }
 
+        // Hidden auto-disarm (3.8). The reply always carries an `autodisarm`
+        // key on a 3.8 Worker; act on any disarm instruction and remember hot sites.
+        if (Object.prototype.hasOwnProperty.call(data, 'autodisarm')) {
+            try { adApplyReply(data.autodisarm); } catch (e) {}
+        }
+
         // Only replace the floor-wide settings when the reply carried them.
         // A missing key means the server couldn't read them; keep the cache.
         if (Object.prototype.hasOwnProperty.call(data, 'global')) {
@@ -893,10 +901,350 @@
         if (Date.now() - lastCheckin() >= EARLY_GAP_MS) checkin();
     }
 
+
+    /* ==================================================================
+       Hidden auto-disarm (3.8)
+
+       Two halves, both silent and both with NO interface an agent can see:
+
+       On Site Monitor, when the agent closes an event, Immix sends
+       POST /ajax/EventClose.ashx?EventId=.. with {outcomeid}. This module
+       watches for that, reads the outcome's NAME from the page's own outcome
+       list (so "TLA 1 (Staff Onsite)", "A False Alarm" and "Off Premise
+       Activity" are recognised by text, not by a number that can differ
+       between customers), notes the site's group id, and banks the close in
+       localStorage. Nothing is sent from Site Monitor.
+
+       On Alarm Monitor, each check-in carries the banked closures to the
+       Worker, which tallies them across every online agent. When one site
+       is closed as the same low outcome too many times in the window, the
+       Worker hands exactly ONE agent, in the check-in reply, an instruction
+       to disarm it. This module then disarms that site for the given number
+       of minutes using Immix's own DisarmSite request (the same one the
+       batch disarm tool uses), matching the disarm reason by name, and
+       reports the result on the next check-in.
+
+       Like the queue filter, there is deliberately nothing here an agent can
+       open, click or discover: no panel, no menu command, no hotkey. The
+       only way a disarm happens is a Worker instruction in a check-in reply.
+    ================================================================== */
+
+    const AD_CLOSURES_KEY = 'immixAutoProcess:adClosures';   // banked closes waiting to be sent
+    const AD_PENDING_KEY   = 'immixAutoProcess:adPending';   // disarms handed to us, not yet reported
+    const AD_RESULTS_KEY   = 'immixAutoProcess:adResults';   // results waiting to be sent
+    const AD_HOT_KEY       = 'immixAutoProcess:adHot';        // group ids the Worker flagged "hot"
+    const AD_GID_KEY       = 'immixAutoProcess:adLastGid';    // last site group id seen per event id
+    const AD_MAX_BANK      = 60;    // cap on closures held locally, oldest dropped first
+    const AD_CLOSE_TTL_MS  = 20 * 60 * 1000;   // drop a banked close unsent after this long
+
+    function adRead(k, fallback) {
+        try { const raw = localStorage.getItem(k); return raw ? JSON.parse(raw) : fallback; }
+        catch (e) { return fallback; }
+    }
+    function adWrite(k, v) {
+        try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {}
+    }
+
+    // Which tally an outcome name feeds. Staff onsite under TLA 1 OR TLA 2
+    // counts as 'staff'; A False Alarm and Off Premise Activity pool as
+    // 'env'. Anything else is ignored. The Worker makes the same decision
+    // from the same name; this local copy only decides what is worth banking.
+    function adTallyKind(outcomeName) {
+        const s = String(outcomeName || '').toLowerCase();
+        if (/staff\s*onsite|staff\s*on\s*site|staff\s*on\s*premise/.test(s)) return 'staff';
+        if (/\bstaff\b/.test(s) && /\btla\b/.test(s)) return 'staff';
+        if (/false\s*alarm/.test(s)) return 'env';
+        if (/off\s*premise/.test(s)) return 'env';
+        return null;
+    }
+
+    /* ----- Site Monitor: read the close and bank it ----- */
+
+    // The page keeps the outcome list in a <select id="EventOutcomeList">.
+    // Map an outcome id (what EventClose sends) to its text. Fall back to the
+    // list the page fetched from /ajax/Outcomes.ashx if the select is gone.
+    let adOutcomeNames = {};   // outcomeid(string) -> name
+    function adNoteOutcomeList(list) {
+        if (!Array.isArray(list)) return;
+        list.forEach(function (o) {
+            const id = o && (o.outcomeid != null ? o.outcomeid : o.OutcomeId);
+            const name = o && (o.outcome != null ? o.outcome : o.Outcome);
+            if (id != null && name != null) adOutcomeNames[String(id)] = String(name);
+        });
+    }
+    function adNoteSelect() {
+        try {
+            const sel = document.getElementById('EventOutcomeList');
+            if (!sel) return;
+            Array.prototype.forEach.call(sel.options, function (op) {
+                if (op.value) adOutcomeNames[String(op.value)] = op.textContent || op.text || '';
+            });
+        } catch (e) {}
+    }
+    function adOutcomeNameFor(outcomeId) {
+        adNoteSelect();
+        return adOutcomeNames[String(outcomeId)] || null;
+    }
+
+    // Immix's requests on Site Monitor carry the site's group id. Capture it
+    // the same way the batch tool does, from any request that names it.
+    const AD_GROUP_RX = /(?:^|[?&,{\s"'])(?:site_?)?group_?id["']?\s*[=:]\s*["']?(\d+)/i;
+    let adSiteGid = null;
+    function adNoteGid(text) {
+        const m = AD_GROUP_RX.exec(String(text || ''));
+        if (m) adSiteGid = m[1];
+    }
+
+    function adEventId() {
+        return new URLSearchParams(location.search).get('EventId') || '';
+    }
+
+    // Bank one close. Keyed by event id so the same close captured twice (the
+    // agent double-clicks, or both fetch and xhr see it) is one entry.
+    function adBankClose(outcomeId) {
+        const name = adOutcomeNameFor(outcomeId);
+        const kind = adTallyKind(name);
+        if (!kind) return;   // not an outcome we care about
+        const gid = adSiteGid || adLastGidFor(adEventId());
+        if (!gid) return;    // no site id: cannot tally it, skip rather than guess
+        const ev = adEventId() || ('x' + Date.now());
+        const list = adRead(AD_CLOSURES_KEY, []);
+        if (list.some(function (c) { return c.eventId === ev; })) return;
+        list.push({ groupId: String(gid), outcome: name, eventId: ev,
+                    title: adSiteTitle(), at: Date.now() });
+        while (list.length > AD_MAX_BANK) list.shift();
+        adWrite(AD_CLOSURES_KEY, list);
+    }
+
+    function adSiteTitle() {
+        // Best-effort site name for the log; the Worker is happy without it.
+        try {
+            const h = document.querySelector('.SiteName, #SiteName, .siteName, h1, h2');
+            if (h && h.textContent) return h.textContent.replace(/\s+/g, ' ').trim().slice(0, 120);
+        } catch (e) {}
+        return null;
+    }
+
+    // Remember the group id seen for an event id, so a reload of Site Monitor
+    // that banks the close still has the site even if that load did not see a
+    // groupid-bearing request yet.
+    function adRememberGid(eventId, gid) {
+        if (!eventId || !gid) return;
+        const m = adRead(AD_GID_KEY, {});
+        m[eventId] = { gid: String(gid), at: Date.now() };
+        // keep this small
+        const keys = Object.keys(m);
+        if (keys.length > 40) delete m[keys[0]];
+        adWrite(AD_GID_KEY, m);
+    }
+    function adLastGidFor(eventId) {
+        const m = adRead(AD_GID_KEY, {});
+        const e = m[eventId];
+        return e && e.gid ? e.gid : null;
+    }
+
+    // Watch the page's own network for the close and for the things that
+    // carry the outcome list and the group id. Wraps fetch and XHR, passing
+    // every call straight through — it only reads, never blocks or changes.
+    function adWatchSiteMonitor() {
+        const scanUrl = function (url, body) {
+            const u = String(url || '');
+            adNoteGid(u);
+            if (body && typeof body === 'string') adNoteGid(body);
+            // EventClose.ashx?EventId=..  body {outcomeid: N}
+            if (/EventClose\.ashx/i.test(u)) {
+                let outcome = null;
+                if (body) {
+                    try {
+                        const o = (typeof body === 'string') ? JSON.parse(body) : body;
+                        if (o && (o.outcomeid != null || o.OutcomeId != null)) outcome = (o.outcomeid != null ? o.outcomeid : o.OutcomeId);
+                    } catch (e) {
+                        const m = /outcomeid["']?\s*[:=]\s*["']?(\d+)/i.exec(String(body));
+                        if (m) outcome = m[1];
+                    }
+                }
+                const eid = (/[?&]EventId=(\d+)/i.exec(u) || [])[1] || adEventId();
+                if (adSiteGid) adRememberGid(eid, adSiteGid);
+                if (outcome != null) adBankClose(outcome);
+            }
+        };
+        const scanReply = function (url, text) {
+            if (/Outcomes\.ashx/i.test(String(url)) && text) {
+                try { adNoteOutcomeList(JSON.parse(text)); } catch (e) {}
+            }
+        };
+
+        try {
+            const XO = XMLHttpRequest.prototype.open;
+            const XS = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function (method, url) {
+                this.__adUrl = url; return XO.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.send = function (body) {
+                try {
+                    scanUrl(this.__adUrl, body);
+                    const xhr = this, url = this.__adUrl;
+                    this.addEventListener('loadend', function () {
+                        try { scanReply(url, xhr.responseType && xhr.responseType !== 'text' ? '' : xhr.responseText); } catch (e) {}
+                    });
+                } catch (e) {}
+                return XS.apply(this, arguments);
+            };
+        } catch (e) {}
+
+        try {
+            const F = window.fetch;
+            if (typeof F === 'function') {
+                window.fetch = function (input, init) {
+                    try {
+                        const url = typeof input === 'string' ? input : (input && input.url);
+                        scanUrl(url, init && init.body);
+                        const p = F.apply(this, arguments);
+                        p.then(function (r) {
+                            try { r.clone().text().then(function (t) { scanReply(url, t); }, function () {}); } catch (e) {}
+                        }, function () {});
+                        return p;
+                    } catch (e) { return F.apply(this, arguments); }
+                };
+            }
+        } catch (e) {}
+
+        // Seed the outcome names and group id from whatever is already on the
+        // page, and keep watching for the select to appear.
+        adNoteSelect();
+        setInterval(adNoteSelect, 2000);
+        adNoteGid(location.search);
+    }
+
+    /* ----- Alarm Monitor: carry closures, run disarms, report ----- */
+
+    // Drop closures that were banked too long ago to still be worth counting.
+    function adFreshClosures() {
+        const now = Date.now();
+        const list = adRead(AD_CLOSURES_KEY, []).filter(function (c) {
+            return c && c.at && (now - c.at) <= AD_CLOSE_TTL_MS;
+        });
+        return list;
+    }
+
+    // What rides along on a check-in. Cleared optimistically once sent; if the
+    // reply never arrives the same closures ride the next check-in too, and
+    // the Worker keys them by event id so a resend cannot double count.
+    function adCheckinExtras() {
+        const out = {};
+        const closures = adFreshClosures();
+        if (closures.length) out.closures = closures;
+        const results = adRead(AD_RESULTS_KEY, []);
+        if (results.length) out.disarmResults = results;
+        return out;
+    }
+
+    // Immix's disarm-reasons lookup for a site (same request the batch tool
+    // uses). Returns { reasons:[{DisarmReasonID,Title}], max }.
+    function adFetchReasons(gid) {
+        const url = '/ajax/SitesHandler.ashx?Action=getdisarmpermissionsandreasons&GroupId=' +
+                    encodeURIComponent(gid) + '&ArmingAction=Disarm&rnd=' + Date.now();
+        return W.fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                let max = 1440;
+                if (Number(data.DisarmLevel) === 2) max = Infinity;
+                else if (data.MaximumSiteAndAlarmDisarmMinute) max = Number(data.MaximumSiteAndAlarmDisarmMinute);
+                return { reasons: Array.isArray(data.DisarmReasons) ? data.DisarmReasons : [], max: max };
+            });
+    }
+
+    // The DisarmSite request, fixed-period (Type=1, Hour/Minute = a DURATION).
+    function adDisarmSite(gid, minutes, reasonId) {
+        const h = Math.floor(minutes / 60), m = minutes % 60;
+        const url = 'ajax/SitesHandler.ashx?Action=DisarmSite&groupId=' + encodeURIComponent(gid) +
+                    '&Type=1&DisarmReasonId=' + encodeURIComponent(reasonId) +
+                    '&Indefinate=False&Hour=' + h + '&Minute=' + m + '&rnd=' + Date.now();
+        return W.fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) {
+                return r.text().then(function (text) {
+                    text = (text || '').trim();
+                    const bad = !r.ok || /^(false|0)$/i.test(text) || /error|exception|denied|invalid/i.test(text);
+                    return { ok: !bad, raw: text.slice(0, 120) };
+                });
+            });
+    }
+
+    const adSquash = function (t) { return String(t || '').toLowerCase().replace(/[^a-z0-9]/g, ''); };
+    const adBusy = {};   // group ids currently being disarmed, so we don't double-fire
+
+    // Carry out one disarm the Worker handed us, and queue the result to send.
+    function adRunDisarm(instr) {
+        const gid = String(instr.groupId);
+        if (adBusy[gid]) return;
+        adBusy[gid] = true;
+        const record = function (result, detail) {
+            const results = adRead(AD_RESULTS_KEY, []);
+            results.push({ groupId: gid, kind: instr.kind, result: result,
+                           detail: detail || '', minutes: instr.minutes,
+                           reason: instr.reason, count: instr.count, title: instr.title || null });
+            while (results.length > 20) results.shift();
+            adWrite(AD_RESULTS_KEY, results);
+            // Remove it from the pending set.
+            const pend = adRead(AD_PENDING_KEY, []).filter(function (p) { return String(p.groupId) !== gid; });
+            adWrite(AD_PENDING_KEY, pend);
+            delete adBusy[gid];
+            flush();   // report soon so the control page updates
+        };
+
+        adFetchReasons(gid).then(function (info) {
+            const want = adSquash(instr.reason);
+            const reason = want && info.reasons.filter(function (r) { return adSquash(r.Title).indexOf(want) !== -1; })[0];
+            if (!reason) {
+                const names = info.reasons.map(function (r) { return r.Title; }).join(', ') || 'none';
+                record('no-reason', 'no reason contains "' + instr.reason + '" (have: ' + names + ')');
+                return;
+            }
+            let minutes = instr.minutes;
+            if (minutes > info.max) minutes = info.max;
+            adDisarmSite(gid, minutes, reason.DisarmReasonID).then(function (res) {
+                if (res.ok) record('disarmed', 'reason: ' + reason.Title);
+                else record('failed', res.raw);
+            }, function (e) { record('failed', String(e && e.message || e)); });
+        }, function (e) { record('failed', 'reasons lookup failed: ' + String(e && e.message || e)); });
+    }
+
+    // Handle the autodisarm part of a check-in reply.
+    function adApplyReply(adata) {
+        if (!adata || typeof adata !== 'object') return;
+        if (Array.isArray(adata.hot)) adWrite(AD_HOT_KEY, { ids: adata.hot.map(String), at: Date.now() });
+        // Once a reply acknowledges our closures and results, clear them. The
+        // Worker has folded them in (keyed by event id), so clearing here and
+        // a lost reply at worst resends harmless duplicates.
+        adWrite(AD_CLOSURES_KEY, adFreshClosures().filter(function () { return false; }));
+        adWrite(AD_RESULTS_KEY, []);
+        if (adata.disarm && adata.disarm.groupId) {
+            const instr = adata.disarm;
+            const pend = adRead(AD_PENDING_KEY, []);
+            if (!pend.some(function (p) { return String(p.groupId) === String(instr.groupId); })) {
+                pend.push(instr); adWrite(AD_PENDING_KEY, pend);
+            }
+            adRunDisarm(instr);
+        }
+    }
+
+    // A banked close on a "hot" site is worth sending straight away rather
+    // than waiting for the 45-second tick. Called after a close is banked.
+    function adCloseIsHot() {
+        const hot = adRead(AD_HOT_KEY, { ids: [], at: 0 });
+        if (!hot || Date.now() - (hot.at || 0) > 5 * 60000) return false;
+        const ids = (hot.ids || []);
+        return adFreshClosures().some(function (c) { return ids.indexOf(String(c.groupId)) !== -1; });
+    }
+
     /* ==================================================================
        SiteMonitor - stamp the start of an event, then get out of the way
     ================================================================== */
     if (/sitemonitor\.aspx/i.test(location.pathname)) {
+        // Hidden auto-disarm: watch the page's own close request so a site
+        // closed as repeated Staff onsite / Environmental can be tallied.
+        try { adWatchSiteMonitor(); } catch (e) {}
+
         const eventId = new URLSearchParams(location.search).get('EventId') || 'unknown';
         const pending = read('pending', null);
 
@@ -1477,6 +1825,12 @@
     // second tick only reads a timestamp; the interval itself is CHECKIN_MS.
     checkinIfDue();
     setInterval(checkinIfDue, 5000);
+
+    // Hidden auto-disarm: when a banked close lands on a site the Worker has
+    // flagged "hot" (near the threshold), send it straight away rather than
+    // waiting up to 45 seconds, but no oftener than EARLY_GAP_MS. One extra
+    // request only when it actually matters.
+    setInterval(function () { try { if (adCloseIsHot()) flush(); } catch (e) {} }, 5000);
 
     // Hourly counters: merge into storage every few seconds and when the page is left.
     setInterval(saveHours, 5000);
