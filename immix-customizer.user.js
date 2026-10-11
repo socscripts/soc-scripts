@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.8.0
+// @version      3.9.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.8.0';   // was reported as 3.4.0 by mistake before 3.8
+    const SCRIPT_VERSION = '3.9.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -1142,13 +1142,31 @@
     // What rides along on a check-in. Cleared optimistically once sent; if the
     // reply never arrives the same closures ride the next check-in too, and
     // the Worker keys them by event id so a resend cannot double count.
+    // What each check-in carried, so its reply clears only those. A result
+    // recorded while a check-in is already on its way stays queued for the
+    // next one instead of being wiped by a reply that never included it.
+    const adSentEvents = {}, adSentRids = {};
     function adCheckinExtras() {
         const out = {};
         const closures = adFreshClosures();
-        if (closures.length) out.closures = closures;
+        if (closures.length) {
+            out.closures = closures;
+            closures.forEach(function (c) { adSentEvents[c.eventId] = true; });
+        }
         const results = adRead(AD_RESULTS_KEY, []);
-        if (results.length) out.disarmResults = results;
+        if (results.length) {
+            out.disarmResults = results;
+            results.forEach(function (r) { if (r.rid) adSentRids[r.rid] = true; });
+        }
         return out;
+    }
+    function adNewRid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+    function adQueueResult(r) {
+        r.rid = adNewRid();
+        const results = adRead(AD_RESULTS_KEY, []);
+        results.push(r);
+        while (results.length > 20) results.shift();
+        adWrite(AD_RESULTS_KEY, results);
     }
 
     // Immix's disarm-reasons lookup for a site (same request the batch tool
@@ -1191,12 +1209,9 @@
         if (adBusy[gid]) return;
         adBusy[gid] = true;
         const record = function (result, detail) {
-            const results = adRead(AD_RESULTS_KEY, []);
-            results.push({ groupId: gid, kind: instr.kind, result: result,
-                           detail: detail || '', minutes: instr.minutes,
-                           reason: instr.reason, count: instr.count, title: instr.title || null });
-            while (results.length > 20) results.shift();
-            adWrite(AD_RESULTS_KEY, results);
+            adQueueResult({ groupId: gid, kind: instr.kind, result: result,
+                            detail: detail || '', minutes: instr.minutes,
+                            reason: instr.reason, count: instr.count, title: instr.title || null });
             // Remove it from the pending set.
             const pend = adRead(AD_PENDING_KEY, []).filter(function (p) { return String(p.groupId) !== gid; });
             adWrite(AD_PENDING_KEY, pend);
@@ -1221,6 +1236,93 @@
         }, function (e) { record('failed', 'reasons lookup failed: ' + String(e && e.message || e)); });
     }
 
+    /* ----- disarms assigned by hand from /autodisarm (3.9) ----- */
+
+    // The page's site list (title, groupid). It may be a window property or a
+    // top-level variable the sandbox cannot see directly, so try the page's
+    // own global scope too, then the copy the batch disarm tool keeps.
+    function adSiteList() {
+        const ok = function (l) { return Array.isArray(l) && l.length ? l : null; };
+        let l = null;
+        try { l = ok(W.sitesList); } catch (e) {}
+        if (!l) {
+            try { l = ok(W.eval('typeof sitesList !== "undefined" ? sitesList : null')); } catch (e) {}
+        }
+        if (!l) {
+            try { l = ok(JSON.parse(localStorage.getItem('disarmtest.sites') || 'null')); } catch (e) {}
+        }
+        return l;
+    }
+    function adNorm(t) { return String(t || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+    function adBare(t) { return adNorm(String(t || '').replace(/\[[^\]]*\]/g, ' ')); }
+    function adRef(t) {
+        const m = String(t || '').match(/\[\s*(\d+(?:\s*-\s*\d+)?)\s*\]/g);
+        return m && m.length ? m[m.length - 1].replace(/[[\]\s]/g, '') : null;
+    }
+
+    // Match what the supervisor typed to exactly one site, or explain why not.
+    function adResolveSite(text, list) {
+        const want = adNorm(text), bare = adBare(text), ref = adRef(text);
+        const tries = [
+            function (x) { return adNorm(x.title) === want; },
+            function (x) { return bare && adBare(x.title) === bare; },
+            function (x) { return ref && adRef(x.title) === ref; },
+            function (x) { return want && adNorm(x.title).indexOf(want) !== -1; }
+        ];
+        for (const t of tries) {
+            const hits = list.filter(t);
+            if (hits.length === 1) return { site: hits[0] };
+            if (hits.length > 1) {
+                return { error: 'ambiguous', detail: hits.slice(0, 5).map(function (x) { return x.title; }).join('; ') +
+                         (hits.length > 5 ? ' (+' + (hits.length - 5) + ' more)' : '') };
+            }
+        }
+        return { error: 'not-found', detail: 'nothing in the site list matches "' + String(text).slice(0, 60) + '"' };
+    }
+
+    const adManualBusy = {};
+    function adRunManual(m) {
+        const id = Number(m.id);
+        if (!id || adManualBusy[id]) return;
+        adManualBusy[id] = true;
+        let gid = m.groupId ? String(m.groupId) : null;
+        let title = null;
+        const record = function (result, detail) {
+            adQueueResult({ manualId: id, kind: 'manual', groupId: gid, title: title, result: result,
+                            detail: detail || '', minutes: m.minutes, reason: m.reason });
+            delete adManualBusy[id];
+            flush();   // report soon so the control page updates
+        };
+
+        const list = adSiteList();
+        if (gid) {
+            const s = list && list.filter(function (x) { return String(x.groupid) === gid; })[0];
+            title = s ? s.title : (/^\d+$/.test(String(m.site)) ? null : String(m.site));
+        } else {
+            if (!list) { record('no-site-list', 'the Alarm Monitor page had not loaded its site list'); return; }
+            const r = adResolveSite(m.site, list);
+            if (r.error) { record(r.error, r.detail); return; }
+            gid = String(r.site.groupid);
+            title = r.site.title;
+        }
+
+        adFetchReasons(gid).then(function (info) {
+            const want = adSquash(m.reason);
+            const reason = want && info.reasons.filter(function (r) { return adSquash(r.Title).indexOf(want) !== -1; })[0];
+            if (!reason) {
+                const names = info.reasons.map(function (r) { return r.Title; }).join(', ') || 'none';
+                record('no-reason', 'no reason contains "' + m.reason + '" (have: ' + names + ')');
+                return;
+            }
+            let minutes = Number(m.minutes) || 30;
+            if (minutes > info.max) minutes = info.max;
+            adDisarmSite(gid, minutes, reason.DisarmReasonID).then(function (res) {
+                if (res.ok) record('disarmed', 'reason: ' + reason.Title);
+                else record('failed', res.raw);
+            }, function (e) { record('failed', String(e && e.message || e)); });
+        }, function (e) { record('failed', 'reasons lookup failed: ' + String(e && e.message || e)); });
+    }
+
     // Handle the autodisarm part of a check-in reply.
     function adApplyReply(adata) {
         if (!adata || typeof adata !== 'object') return;
@@ -1228,8 +1330,11 @@
         // Once a reply acknowledges our closures and results, clear them. The
         // Worker has folded them in (keyed by event id), so clearing here and
         // a lost reply at worst resends harmless duplicates.
-        adWrite(AD_CLOSURES_KEY, adFreshClosures().filter(function () { return false; }));
-        adWrite(AD_RESULTS_KEY, []);
+        adWrite(AD_CLOSURES_KEY, adFreshClosures().filter(function (c) { return !adSentEvents[c.eventId]; }));
+        adWrite(AD_RESULTS_KEY, adRead(AD_RESULTS_KEY, []).filter(function (r) { return !(r.rid && adSentRids[r.rid]); }));
+        Object.keys(adSentEvents).forEach(function (k) { delete adSentEvents[k]; });
+        Object.keys(adSentRids).forEach(function (k) { delete adSentRids[k]; });
+        if (adata.manual && adata.manual.id) adRunManual(adata.manual);
         if (adata.disarm && adata.disarm.groupId) {
             const instr = adata.disarm;
             const pend = adRead(AD_PENDING_KEY, []);
