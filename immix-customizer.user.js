@@ -1017,7 +1017,19 @@
     }
 
     function adSiteTitle() {
-        // Best-effort site name for the log; the Worker is happy without it.
+        // The header bar at the top of Site Monitor: <span id="spanSiteTitle"
+        // class="site-monitor-header-title" title="...">Name</span>. The title
+        // attribute holds the same text and is used as a fallback in case the
+        // element is ever present but empty mid-render.
+        try {
+            const t = document.getElementById('spanSiteTitle') ||
+                      document.querySelector('.site-monitor-header-title');
+            if (t) {
+                const name = (t.textContent || t.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+                if (name) return name.slice(0, 120);
+            }
+        } catch (e) {}
+        // Older/fallback guesses, kept in case the header markup changes.
         try {
             const h = document.querySelector('.SiteName, #SiteName, .siteName, h1, h2');
             if (h && h.textContent) return h.textContent.replace(/\s+/g, ' ').trim().slice(0, 120);
