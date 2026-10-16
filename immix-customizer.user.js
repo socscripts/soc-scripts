@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.9.0
+// @version      3.10.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.9.0';
+    const SCRIPT_VERSION = '3.10.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -654,9 +654,78 @@
             lastStall:     d.lastStall,
             lastStallAt:   d.lastStallAt,
             hours:         hoursToSend(),
+            // Queue snapshot for the wall display (3.10). Alarm Monitor only.
+            queue:         wallQueueSnapshot(),
             // Hidden auto-disarm: banked closures and any disarm results to report.
             ...adCheckinExtras()
         });
+    }
+
+    /* --------------------------------------------------------------
+       Wall display queue snapshot (3.10)
+
+       The wall's four queue boxes (oldest over 400, oldest parked, events
+       in queue, average age) are fed from here. The snapshot rides inside
+       the normal check-in, so it adds no requests. The Worker keeps only
+       the latest one and rewrites it at most every 10 seconds however many
+       agents send it. Read-only: it never touches the queue.
+    -------------------------------------------------------------- */
+    const WALL_MIN_PRIORITY = 400;   // "oldest event in queue" counts priorities above this
+    const WALL_STAMP = /^\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M$/i;
+
+    function wallParked() {
+        // The tab under the queue reads "Parked Events (n)".
+        let tab = null;
+        const els = document.querySelectorAll('a, li, button, span');
+        for (let i = 0; i < els.length; i++) {
+            const t = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
+            if (/^Parked Events \(\d+\)$/i.test(t) && (!tab || tab.contains(els[i]))) tab = els[i];
+        }
+        if (!tab) return { count: null, oldest: null, ok: false };
+        const count = parseInt(/\((\d+)\)/.exec(tab.textContent)[1], 10);
+        if (!count) return { count: 0, oldest: null, ok: true };
+
+        // Find the panel the tab opens, then the earliest time in it.
+        let panel = null, node = tab;
+        for (let i = 0; i < 3 && node && !panel; i++, node = node.parentElement) {
+            const id = node.getAttribute('aria-controls') || node.getAttribute('data-target') ||
+                       node.getAttribute('data-bs-target') || (node.getAttribute('href') || '').replace(/^.*#/, '');
+            if (id) panel = document.getElementById(id.replace(/^#/, ''));
+        }
+        let oldest = null;
+        if (panel) {
+            const cells = panel.querySelectorAll('td');
+            for (let i = 0; i < cells.length; i++) {
+                const t = (cells[i].textContent || '').trim();
+                if (!WALL_STAMP.test(t)) continue;
+                const ms = Date.parse(t);
+                if (!isNaN(ms) && (oldest === null || ms < oldest)) oldest = ms;
+            }
+        }
+        return { count: count, oldest: oldest, ok: oldest !== null };
+    }
+
+    function wallQueueSnapshot() {
+        try {
+            if (PAGE_NAME !== 'alarmmonitor') return null;
+            if (!document.getElementById('alarmTable') || connectionError()) return null;
+            const col = prioColumn();
+            let n = 0, sum = 0, hi = null;
+            queueRows().forEach(function (row) {
+                const t = rowTime(row);
+                if (isNaN(t)) return;
+                n++; sum += t;
+                const p = rowPrio(row, col);
+                const pn = p === null ? null : parseInt(p, 10);
+                if ((pn === null || pn > WALL_MIN_PRIORITY) && (hi === null || t < hi)) hi = t;
+            });
+            const pk = wallParked();
+            return {
+                n: n, meanT: n ? Math.round(sum / n) : null, oldestHiT: hi,
+                oldestParkedT: pk.oldest, parkedN: pk.count, parkedOk: pk.ok,
+                reporter: deviceId(), sentAt: Date.now()
+            };
+        } catch (e) { return null; }
     }
 
     /* --------------------------------------------------------------
