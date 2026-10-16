@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.9.0';
+    const SCRIPT_VERSION = '3.11.0';
 
     /* ------------------------------------------------------------------
        Settings
