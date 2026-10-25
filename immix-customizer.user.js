@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.11.0
-// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight) for the Immix Alarm Monitor.
+// @version      3.12.0
+// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight), plus the 4K target goal, daily leaderboard places and star ranking from the Supervisor Dashboard, for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
 // @match        https://newapp.smartviewplus.com/SiteMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.11.0';
+    const SCRIPT_VERSION = '3.12.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -595,6 +595,29 @@
 
     function forcedOn()  { return forcedMode() === 'on'; }
     function forcedOff() { return forcedMode() === 'off'; }
+    /* ------------------------------------------------------------------
+       The agent's own card: 4K target goal, daily leaderboard places and
+       star ranking, graded by the Worker with the Supervisor Dashboard's
+       own code. It rides on a check-in about every ten minutes (the
+       grades only change hourly), and is kept here between page loads.
+    ------------------------------------------------------------------ */
+    const CARD_KEY      = 'immixAutoProcess:card';
+    const CARD_EVERY_MS = 10 * 60 * 1000;
+
+    function cardStored() {
+        try {
+            const raw = localStorage.getItem(CARD_KEY + ':' + uid());
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function cardWanted() {
+        const c = cardStored();
+        return !c || Date.now() - (c.fetchedAt || 0) >= CARD_EVERY_MS;
+    }
+
     function scheduleSuspended() {
         const e = effectivePolicy();
         return !!(e && e.kind === 'suspended');
@@ -654,6 +677,7 @@
             lastStall:     d.lastStall,
             lastStallAt:   d.lastStallAt,
             hours:         hoursToSend(),
+            wantCard:      cardWanted(),
             // Hidden auto-disarm: banked closures and any disarm results to report.
             ...adCheckinExtras()
         });
@@ -823,6 +847,15 @@
         // key on a 3.8 Worker; act on any disarm instruction and remember hot sites.
         if (Object.prototype.hasOwnProperty.call(data, 'autodisarm')) {
             try { adApplyReply(data.autodisarm); } catch (e) {}
+        }
+
+        // The agent's card (3.12). A missing key means an older Worker or a
+        // failed lookup: keep whatever is stored. null means not on the roster.
+        if (Object.prototype.hasOwnProperty.call(data, 'card')) {
+            try {
+                localStorage.setItem(CARD_KEY + ':' + uid(), JSON.stringify({ card: data.card, fetchedAt: Date.now() }));
+            } catch (e) {}
+            try { paintGoalCard(); } catch (e) {}
         }
 
         // Only replace the floor-wide settings when the reply carried them.
@@ -1606,6 +1639,7 @@
             '  <div>Processed <span id="apCount" style="color:#fff;font-weight:bold;">0</span></div>' +
             '  <div>Average <span id="apAvg" style="color:#fff;font-weight:bold;">--</span></div>' +
             '</div>' +
+            '<div id="apGoalCard"></div>' +
             '<div style="margin-top:8px;border-top:1px solid #3a3a3a;padding-top:6px;">' +
             '  <div style="font-size:10px;color:#999;margin-bottom:3px;">Pickup speed</div>' +
             '  <select id="apSpeed" style="width:100%;background:#2a2a2a;color:#fff;' +
@@ -1639,6 +1673,140 @@
         });
 
         paintPanel();
+        paintGoalCard();
+    }
+
+    /* ------------------------------------------------------------------
+       Star ranking, 4K target goal and daily leaderboard, on the panel.
+       Same numbers and colours as the Supervisor Dashboard. Repainted only
+       when a new card arrives, not every tick.
+    ------------------------------------------------------------------ */
+    const BAND_COLOR = {
+        'Exceeds': '#6EE7A8', 'Meets': '#7CC4FF',
+        'Needs improvement': '#FBBF24', 'Action plan': '#FCA5A5'
+    };
+
+    function cardEsc(v) {
+        return String(v === null || v === undefined ? '' : v)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function cardNum(n) {
+        return (n === null || n === undefined || isNaN(n)) ? '--' : Math.round(n).toLocaleString();
+    }
+    function cardMonthName(m, len) {
+        const p = String(m || '').split('-');
+        if (p.length !== 2) return '';
+        return new Date(+p[0], +p[1] - 1, 1).toLocaleDateString(undefined, { month: len || 'long' });
+    }
+    // "2026-10-15" -> "Oct 15"
+    function cardDay(day) {
+        const p = String(day || '').split('-');
+        if (p.length !== 3) return day || '';
+        return new Date(+p[0], +p[1] - 1, +p[2]).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+
+    function starsHtml(r, size) {
+        const pct = (r === null || r === undefined) ? 0 : Math.max(0, Math.min(100, r / 5 * 100));
+        const s = '\u2605\u2605\u2605\u2605\u2605';
+        return '<span style="position:relative;display:inline-block;font-size:' + (size || 15) + 'px;' +
+               'letter-spacing:1px;color:#4a4a4a;line-height:1;white-space:nowrap;" ' +
+               'aria-label="' + (r === null || r === undefined ? 'no rating' : r.toFixed(1) + ' of 5 stars') + '">' + s +
+               '<span style="position:absolute;left:0;top:0;width:' + pct.toFixed(1) + '%;overflow:hidden;' +
+               'color:#F0A81C;white-space:nowrap;">' + s + '</span></span>';
+    }
+
+    const CARD_SECTION = 'margin-top:8px;border-top:1px solid #3a3a3a;padding-top:6px;';
+    const CARD_HEAD    = 'font-size:10px;color:#999;margin-bottom:3px;';
+
+    function paintGoalCard() {
+        const box = panel && panel.querySelector('#apGoalCard');
+        if (!box) return;
+
+        const stored = cardStored();
+        if (!stored) {
+            box.innerHTML = '<div style="' + CARD_SECTION + 'color:#777;font-size:10px;">Loading your goal and ranking\u2026</div>';
+            return;
+        }
+        const c = stored.card;
+        if (!c) {
+            box.innerHTML = '<div style="' + CARD_SECTION + 'color:#999;font-size:10px;">' +
+                'Goal and ranking show once you are on the roster. Ask your supervisor.</div>';
+            return;
+        }
+
+        let html = '';
+
+        // Star ranking
+        const band = BAND_COLOR[c.band] || '#999';
+        html += '<div style="' + CARD_SECTION + '">' +
+            '<div style="' + CARD_HEAD + '">Star ranking \u00b7 ' + cardEsc(cardMonthName(c.month, 'short')) + '</div>';
+        if (c.grade === null || c.grade === undefined) {
+            html += '<div style="color:#999;">No grade yet this month</div>';
+        } else {
+            html += '<div>' + starsHtml(c.grade, 15) + '</div>' +
+                '<div style="margin-top:2px;"><span style="color:#fff;font-weight:bold;font-size:14px;">' + c.grade.toFixed(1) + '</span>' +
+                '<span style="color:#999;"> / 5</span></div>' +
+                '<div style="color:' + band + ';font-weight:bold;">' + cardEsc(c.band) + '</div>' +
+                (c.rank ? '<div>Rank <span style="color:#fff;font-weight:bold;">' + c.rank + '</span> of ' + (c.ranked || '--') +
+                    ' <span style="color:#999;">(' + cardEsc(c.shift) + ')</span></div>' : '') +
+                (c.shiftAvgGrade !== null && c.shiftAvgGrade !== undefined
+                    ? '<div style="color:#999;font-size:10px;">Shift average ' + c.shiftAvgGrade.toFixed(1) + '</div>' : '');
+        }
+        html += '</div>';
+
+        // 4K target goal
+        const g = c.goal || {};
+        const target = g.target || 4000, ev = g.events || 0, pace = g.paceNow || 0;
+        const proj = (g.projected === null || g.projected === undefined) ? null : g.projected;
+        const scale = Math.max(target, ev, proj || 0) * 1.05 || 1;
+        const pct = function (v) { return Math.max(0, Math.min(100, v / scale * 100)).toFixed(1) + '%'; };
+        // With a projection (this month, schedule-aware) it decides the pace;
+        // otherwise the even spread of 4,000 across the month so far does.
+        const ahead = proj !== null ? proj >= target : ev >= pace;
+        const fill = ev >= target ? '#30A46C' : (ahead ? '#0090FF' : '#D8A128');
+        const paceText  = ev >= target ? 'Goal met' : (ahead ? 'On pace' : 'Behind pace');
+        const paceColor = ev >= target ? '#6EE7A8' : (ahead ? '#7CC4FF' : '#FBBF24');
+
+        html += '<div style="' + CARD_SECTION + '">' +
+            '<div style="' + CARD_HEAD + '">4K target goal \u00b7 ' + cardEsc(cardMonthName(c.month, 'short')) + '</div>' +
+            '<div><span style="color:#fff;font-weight:bold;font-size:14px;">' + cardNum(ev) + '</span>' +
+            '<span style="color:#999;"> / ' + cardNum(target) + '</span></div>' +
+            '<div style="position:relative;height:8px;margin:5px 2px 4px;background:#333;border-radius:4px;" ' +
+                'title="' + cardNum(ev) + ' events' + (proj !== null ? ', projected ' + cardNum(proj) : '') +
+                (pace && pace < target ? ', on pace today: ' + cardNum(pace) : '') + '">' +
+              (proj !== null && proj > ev
+                ? '<div style="position:absolute;left:0;top:0;bottom:0;width:' + pct(proj) + ';border-radius:4px;' +
+                  'background:repeating-linear-gradient(135deg,rgba(124,196,255,.45) 0 3px,rgba(124,196,255,.12) 3px 6px);"></div>' : '') +
+              '<div style="position:absolute;left:0;top:0;bottom:0;width:' + pct(ev) + ';border-radius:4px;background:' + fill + ';"></div>' +
+              (pace && pace < target
+                ? '<div style="position:absolute;top:-2px;bottom:-2px;width:1px;left:' + pct(pace) + ';background:#bbb;"></div>' : '') +
+              '<div style="position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;left:' + pct(target) + ';background:#fff;"></div>' +
+            '</div>' +
+            '<div style="color:' + paceColor + ';font-weight:bold;">' + paceText + '</div>' +
+            (proj !== null ? '<div>Projected <span style="color:#fff;font-weight:bold;">' + cardNum(proj) + '</span></div>' : '') +
+            (proj === null && pace && pace < target && ev < target
+                ? '<div style="color:#999;font-size:10px;">' + (ahead ? cardNum(ev - pace) + ' ahead of' : cardNum(pace - ev) + ' behind') + ' today\u2019s pace</div>' : '') +
+            '<div style="color:#777;font-size:10px;">' + (g.official ? 'Official count as of ' + cardEsc(cardDay(g.asOf)) : 'Live estimate') + '</div>' +
+            '</div>';
+
+        // Daily leaderboard
+        const b = c.board || {};
+        const place = function (n, color, label) {
+            return '<div style="flex:1;"><div style="font-size:9px;color:#999;">' +
+                '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + color + ';margin-right:3px;"></span>' +
+                label + '</div><div style="color:#fff;font-weight:bold;font-size:13px;">' + (n || 0) + '</div></div>';
+        };
+        html += '<div style="' + CARD_SECTION + '">' +
+            '<div style="' + CARD_HEAD + '">Daily leaderboard</div>' +
+            '<div style="display:flex;gap:2px;">' + place(b.first, '#FFC53D', '1st') + place(b.second, '#D4D4D4', '2nd') + place(b.third, '#D08A4C', '3rd') + '</div>' +
+            '<div style="margin-top:3px;"><span style="color:#fff;font-weight:bold;">' + (b.points || 0) + '</span> pts in ' +
+                (b.days || 0) + ' day' + (b.days === 1 ? '' : 's') + '</div>' +
+            (b.perDay !== null && b.perDay !== undefined
+                ? '<div style="color:#999;font-size:10px;">' + b.perDay.toFixed(2) + ' a day' +
+                  (b.shiftPerDay !== null && b.shiftPerDay !== undefined ? ' (shift ' + b.shiftPerDay.toFixed(2) + ')' : '') + '</div>' : '') +
+            '</div>';
+
+        if (box.innerHTML !== html) box.innerHTML = html;
     }
 
     function paintPanel() {
