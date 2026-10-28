@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.12.0
+// @version      3.13.0
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight), plus the 4K target goal, daily leaderboard places and star ranking from the Supervisor Dashboard, for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -29,7 +29,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.12.0';
+    const SCRIPT_VERSION = '3.13.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -1674,7 +1674,73 @@
 
         paintPanel();
         paintGoalCard();
+        placePanel(true);
     }
+
+    /* ------------------------------------------------------------------
+       Where the panel sits. When the alarm table leaves room on its right
+       (the Process Alarm button has wrapped below it), the panel floats in
+       that gap, level with the top of the table. Otherwise it stays in its
+       old place under the Process Alarm button. Checked twice a second and
+       on any scroll or resize, so it follows the page as it reflows.
+    ------------------------------------------------------------------ */
+    const GAP_MIN_PX   = 190;   // narrower than this and the panel goes back under the button
+    const GAP_MAX_W    = 240;   // widest the panel gets in the gap
+    let lastPlacedAt   = 0;
+
+    // The empty page to the right of the main Alarms box, or null. That box
+    // is a fixed width, so a wide window leaves room beside it; the panel
+    // sits there, level with the top of the alarm table, and never covers
+    // the Process Alarm button. Too narrow, and it goes back under the button.
+    function findGap() {
+        const main = document.querySelector('.main .contentbox') || document.querySelector('.contentbox');
+        const rows = document.getElementById('alarmTable');
+        if (!main || !rows) return null;
+        const mr = main.getBoundingClientRect();
+        const tableBox = rows.closest('.eventsAlarmsContainer') || rows.closest('table') || rows;
+        const tr = tableBox.getBoundingClientRect();
+        const pageRight = document.documentElement.clientWidth;
+        if (!mr.width || pageRight - mr.right < GAP_MIN_PX) return null;
+        return { left: mr.right, right: pageRight, top: tr.top };
+    }
+
+    function placePanel(force) {
+        if (!panel) return;
+        const now = Date.now();
+        if (!force && now - lastPlacedAt < 500) return;
+        lastPlacedAt = now;
+
+        const gap = findGap();
+        if (gap) {
+            const room = gap.right - gap.left;
+            const w    = Math.min(GAP_MAX_W, room - 24);
+            const left = Math.round(gap.left + 12 + window.scrollX) + 'px';
+            const top  = Math.round(gap.top + window.scrollY) + 'px';
+            if (panel.parentNode !== document.body) document.body.appendChild(panel);
+            if (panel.style.position !== 'absolute') {
+                panel.style.position = 'absolute';
+                panel.style.margin = '0';
+                panel.style.zIndex = '50';
+            }
+            if (panel.style.left !== left) panel.style.left = left;
+            if (panel.style.top !== top) panel.style.top = top;
+            if (panel.style.width !== w + 'px') panel.style.width = w + 'px';
+        } else {
+            const host = document.querySelector('.side-buttons');
+            if (host && panel.parentNode !== host) host.appendChild(panel);
+            if (panel.style.position === 'absolute') {
+                panel.style.position = '';
+                panel.style.left = '';
+                panel.style.top = '';
+                panel.style.width = '';
+                panel.style.zIndex = '';
+                panel.style.margin = '';
+                panel.style.marginTop = '10px';
+            }
+        }
+    }
+    window.addEventListener('resize', function () { placePanel(true); });
+    window.addEventListener('scroll', function () { placePanel(true); }, true);
 
     /* ------------------------------------------------------------------
        Star ranking, 4K target goal and daily leaderboard, on the panel.
@@ -1738,7 +1804,11 @@
 
         // Star ranking
         const band = BAND_COLOR[c.band] || '#999';
-        html += '<div style="' + CARD_SECTION + '">' +
+        // With the category breakdown (Worker 3.13), the section opens it.
+        const canExplain = Array.isArray(c.categories) && c.categories.length && c.grade !== null && c.grade !== undefined;
+        html += '<div style="' + CARD_SECTION + '"' +
+            (canExplain ? ' id="apRankBtn" role="button" tabindex="0" title="See how your grade is made"' +
+                ' aria-label="Star ranking: see how your grade is made"' : '') + '>' +
             '<div style="' + CARD_HEAD + '">Star ranking \u00b7 ' + cardEsc(cardMonthName(c.month, 'short')) + '</div>';
         if (c.grade === null || c.grade === undefined) {
             html += '<div style="color:#999;">No grade yet this month</div>';
@@ -1750,7 +1820,8 @@
                 (c.rank ? '<div>Rank <span style="color:#fff;font-weight:bold;">' + c.rank + '</span> of ' + (c.ranked || '--') +
                     ' <span style="color:#999;">(' + cardEsc(c.shift) + ')</span></div>' : '') +
                 (c.shiftAvgGrade !== null && c.shiftAvgGrade !== undefined
-                    ? '<div style="color:#999;font-size:10px;">Shift average ' + c.shiftAvgGrade.toFixed(1) + '</div>' : '');
+                    ? '<div style="color:#999;font-size:10px;">Shift average ' + c.shiftAvgGrade.toFixed(1) + '</div>' : '') +
+                (canExplain ? '<div style="color:#7CC4FF;font-size:10px;text-decoration:underline;cursor:pointer;">How is this graded?</div>' : '');
         }
         html += '</div>';
 
@@ -1807,7 +1878,143 @@
             '</div>';
 
         if (box.innerHTML !== html) box.innerHTML = html;
+
+        // One set of handlers on the box, so repainting never loses them.
+        if (!box.dataset.wired) {
+            box.dataset.wired = '1';
+            box.addEventListener('click', function (e) {
+                const btn = e.target.closest && e.target.closest('#apRankBtn');
+                if (btn) openGradeExplainer(btn);
+            });
+            box.addEventListener('keydown', function (e) {
+                const btn = e.target.closest && e.target.closest('#apRankBtn');
+                if (btn && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openGradeExplainer(btn); }
+            });
+        }
     }
+
+    /* ------------------------------------------------------------------
+       "How is this graded?": the same breakdown as the agent's report card
+       on the Supervisor Dashboard. Each category against the shift
+       average, coloured the way the dashboard colours it.
+    ------------------------------------------------------------------ */
+    let explainer = null, explainerReturn = null;
+
+    // The dashboard's bar colours: a rating against the shift's average for it.
+    function barBand(r, avg) {
+        if (r === null || r === undefined) return ['No data', '#4a4a4a', '#999'];
+        if (!avg) return ['Meets', '#0090FF', '#7CC4FF'];
+        const x = r / avg;
+        if (x >= 1.10) return ['Exceeds', '#30A46C', '#6EE7A8'];
+        if (x >= 0.90) return ['Meets', '#0090FF', '#7CC4FF'];
+        if (x >= 0.75) return ['Needs improvement', '#D8A128', '#FBBF24'];
+        return ['Action plan', '#E5484D', '#FCA5A5'];
+    }
+
+    function explainerHtml(c) {
+        const band = BAND_COLOR[c.band] || '#999';
+        let h = '<div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;">' +
+            '<div style="flex:1;min-width:220px;">' +
+              '<div id="apExplainTitle" style="font-size:18px;font-weight:bold;color:#fff;">How your grade is made</div>' +
+              '<div style="color:#aaa;font-size:12px;margin-top:2px;">' + cardEsc(cardMonthName(c.month)) +
+                (c.shift ? ' \u00b7 ' + cardEsc(c.shift) + ' shift' : '') +
+                (c.board && c.board.days ? ' \u00b7 ' + c.board.days + ' day' + (c.board.days === 1 ? '' : 's') + ' worked' : '') +
+                (c.goal ? ' \u00b7 ' + cardNum(c.goal.events) + ' events' : '') +
+                (c.rank ? ' \u00b7 Rank ' + c.rank + ' of ' + (c.ranked || '--') : '') + '</div>' +
+            '</div>' +
+            '<div style="display:flex;align-items:baseline;gap:6px;">' +
+              '<span style="font-size:34px;font-weight:bold;color:#fff;line-height:1;">' + c.grade.toFixed(1) + '</span>' +
+              '<span style="color:#aaa;">/ 5 stars</span>' +
+              '<span style="margin-left:6px;padding:2px 9px;border-radius:999px;background:#2a2a2a;color:' + band + ';font-size:12px;font-weight:bold;">' + cardEsc(c.band) + '</span>' +
+            '</div>' +
+            '<button type="button" id="apExplainClose" aria-label="Close" style="width:36px;height:36px;border:1px solid #444;border-radius:8px;background:#222;color:#ccc;font-size:16px;cursor:pointer;">\u2715</button>' +
+            '</div>';
+
+        // legend
+        h += '<div style="display:flex;flex-wrap:wrap;gap:14px;margin:14px 0 6px;font-size:12px;color:#bbb;">' +
+            [['#30A46C', 'Exceeds'], ['#0090FF', 'Meets'], ['#D8A128', 'Needs improvement'], ['#E5484D', 'Action plan']].map(function (x) {
+                return '<span><span style="display:inline-block;width:12px;height:8px;border-radius:2px;background:' + x[0] + ';margin-right:6px;"></span>' + x[1] + '</span>';
+            }).join('') +
+            '<span><span style="display:inline-block;width:2px;height:12px;background:#fff;margin-right:6px;vertical-align:-2px;"></span>Shift average</span></div>';
+
+        // one row per category
+        c.categories.forEach(function (cat) {
+            const r = cat.rating, avg = cat.shiftAvg, bb = barBand(r, avg);
+            const d = (r !== null && r !== undefined && avg !== null && avg !== undefined) ? r - avg : null;
+            const basis = String(cat.basis || '').replace(/\btheir\b/g, 'your');
+            h += '<div style="display:grid;grid-template-columns:minmax(150px,230px) minmax(0,1fr) 92px;gap:14px;align-items:center;padding:9px 0;border-top:1px solid #2c2c2c;">' +
+                '<div><div style="color:#eee;font-size:13px;">' + cardEsc(cat.name) +
+                    ' <span style="color:#888;font-size:11px;">' + Math.round((cat.weight || 0) * 100) + '%</span></div>' +
+                    '<div style="color:#999;font-size:11px;font-family:Consolas,Menlo,monospace;">' + cardEsc(basis) + '</div></div>' +
+                '<div style="position:relative;height:10px;background:#333;border-radius:999px;" role="img" aria-label="' +
+                    cardEsc(cat.name + ': ' + (r === null || r === undefined ? 'no data' : r.toFixed(1) + ' stars, ' + bb[0]) +
+                    (avg === null || avg === undefined ? '' : ', shift average ' + avg.toFixed(1))) + '">' +
+                    '<div style="position:absolute;left:0;top:0;bottom:0;border-radius:999px;width:' + (r === null || r === undefined ? 0 : r / 5 * 100) + '%;background:' + bb[1] + ';"></div>' +
+                    (avg === null || avg === undefined ? '' :
+                        '<div style="position:absolute;top:-5px;bottom:-5px;width:2px;margin-left:-1px;left:' + (avg / 5 * 100) + '%;background:#fff;"></div>') +
+                '</div>' +
+                '<div style="text-align:right;font-family:Consolas,Menlo,monospace;color:#fff;font-size:13px;">' +
+                    (r === null || r === undefined ? '--' : r.toFixed(1)) +
+                    (d === null ? '' : ' <span style="font-size:11px;color:' + bb[2] + ';">' + (d >= 0 ? '+' : '\u2212') + Math.abs(d).toFixed(1) + '</span>') +
+                '</div></div>';
+        });
+
+        // where the most stars are to be had: weight times the room left below 5
+        const room = c.categories.filter(function (x) { return x.rating !== null && x.rating !== undefined; })
+            .map(function (x) { return { name: x.name, gain: (x.weight || 0) * (5 - x.rating) }; })
+            .sort(function (a, b) { return b.gain - a.gain; })
+            .filter(function (x) { return x.gain >= 0.05; }).slice(0, 2);
+        if (room.length) {
+            h += '<div style="margin-top:10px;padding:10px 12px;border:1px solid #333;border-radius:8px;color:#ddd;font-size:13px;">' +
+                'Most room to grow: <b>' + room.map(function (x) { return cardEsc(x.name); }).join('</b> and <b>') + '</b>.</div>';
+        }
+        h += '<div style="margin-top:10px;color:#888;font-size:11px;">Each category is rated 1\u20135 stars against everyone on your shift, so the shift average is the yardstick. ' +
+            'The percentages are each category\u2019s weight in your grade. Grades update every hour.</div>';
+        return h;
+    }
+
+    function openGradeExplainer(from) {
+        const stored = cardStored(), c = stored && stored.card;
+        if (!c || !Array.isArray(c.categories) || !c.categories.length || c.grade === null || c.grade === undefined) return;
+        closeGradeExplainer(false);
+        explainerReturn = from || null;
+
+        explainer = document.createElement('div');
+        explainer.id = 'apGradeExplainer';
+        explainer.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.6);' +
+            'display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:48px 16px;font-family:Arial,sans-serif;';
+        const dialog = document.createElement('div');
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-modal', 'true');
+        dialog.setAttribute('aria-labelledby', 'apExplainTitle');
+        dialog.style.cssText = 'width:min(760px,100%);box-sizing:border-box;background:#1c1c1c;border:1px solid #4a4a4a;' +
+            'border-radius:10px;padding:20px 22px;color:#ddd;box-shadow:0 20px 50px rgba(0,0,0,.5);text-align:left;';
+        dialog.innerHTML = explainerHtml(c);
+        explainer.appendChild(dialog);
+        document.body.appendChild(explainer);
+
+        explainer.addEventListener('click', function (e) { if (e.target === explainer) closeGradeExplainer(true); });
+        dialog.querySelector('#apExplainClose').addEventListener('click', function () { closeGradeExplainer(true); });
+        dialog.querySelector('#apExplainClose').focus();
+    }
+
+    function closeGradeExplainer(restore) {
+        if (!explainer) return;
+        explainer.remove();
+        explainer = null;
+        if (restore && explainerReturn && explainerReturn.isConnected) explainerReturn.focus();
+        explainerReturn = null;
+    }
+
+    // While it is open, keys belong to it: Escape closes it, and nothing
+    // reaches the page, so typing A cannot process an alarm underneath.
+    window.addEventListener('keydown', function (e) {
+        if (!explainer) return;
+        if (e.key === 'Escape') { e.preventDefault(); closeGradeExplainer(true); }
+        else if (e.key === 'Tab') { e.preventDefault(); const b = explainer.querySelector('#apExplainClose'); if (b) b.focus(); return; }
+        e.stopPropagation();
+        if (e.key !== 'Enter' && e.key !== ' ') e.preventDefault();
+    }, true);
 
     function paintPanel() {
         if (!panel) return;
@@ -2017,6 +2224,7 @@
 
         paintButton();
         paintPanel();
+        placePanel(false);
         applyTint(tintForNow());
 
         // Track how long the queue has had something in it.
