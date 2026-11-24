@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.13.0
-// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight), plus the 4K target goal, daily leaderboard places and star ranking from the Supervisor Dashboard, for the Immix Alarm Monitor.
+// @version      3.14.0
+// @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight), plus the 4K target goal, daily leaderboard places and star ranking from the Supervisor Dashboard, plus each site's scheduled disarm time in the Armed Sites and Site Check lists, for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
 // @match        https://newapp.smartviewplus.com/SiteMonitor.aspx*
+// @match        https://newapp.smartviewplus.com/SiteDetails.aspx*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @connect      immix-telemetry.soc-autoprocess.workers.dev
@@ -29,7 +30,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.13.0';
+    const SCRIPT_VERSION = '3.14.0';
 
     /* ------------------------------------------------------------------
        Settings
@@ -679,7 +680,10 @@
             hours:         hoursToSend(),
             wantCard:      cardWanted(),
             // Hidden auto-disarm: banked closures and any disarm results to report.
-            ...adCheckinExtras()
+            ...adCheckinExtras(),
+            // Site arming schedules (3.14): new ones read on Site Details, and
+            // where to continue fetching everyone's from.
+            ...schedCheckinExtras()
         });
     }
 
@@ -847,6 +851,12 @@
         // key on a 3.8 Worker; act on any disarm instruction and remember hot sites.
         if (Object.prototype.hasOwnProperty.call(data, 'autodisarm')) {
             try { adApplyReply(data.autodisarm); } catch (e) {}
+        }
+
+        // Site arming schedules (3.14). Missing means an older Worker or no
+        // table yet: keep the outbox and the cached copy as they are.
+        if (Object.prototype.hasOwnProperty.call(data, 'schedules')) {
+            try { if (schedApplyReply(data.schedules)) markCheckin(Date.now() - Math.max(0, CHECKIN_MS - 5000)); } catch (e) {}
         }
 
         // The agent's card (3.12). A missing key means an older Worker or a
@@ -1339,21 +1349,63 @@
             title = r.site.title;
         }
 
-        adFetchReasons(gid).then(function (info) {
-            const want = adSquash(m.reason);
-            const reason = want && info.reasons.filter(function (r) { return adSquash(r.Title).indexOf(want) !== -1; })[0];
-            if (!reason) {
-                const names = info.reasons.map(function (r) { return r.Title; }).join(', ') || 'none';
-                record('no-reason', 'no reason contains "' + m.reason + '" (have: ' + names + ')');
-                return;
-            }
-            let minutes = Number(m.minutes) || 30;
-            if (minutes > info.max) minutes = info.max;
-            adDisarmSite(gid, minutes, reason.DisarmReasonID).then(function (res) {
-                if (res.ok) record('disarmed', 'reason: ' + reason.Title);
-                else record('failed', res.raw);
-            }, function (e) { record('failed', String(e && e.message || e)); });
-        }, function (e) { record('failed', 'reasons lookup failed: ' + String(e && e.message || e)); });
+        const go = function () {
+            adFetchReasons(gid).then(function (info) {
+                const want = adSquash(m.reason);
+                const reason = want && info.reasons.filter(function (r) { return adSquash(r.Title).indexOf(want) !== -1; })[0];
+                if (!reason) {
+                    const names = info.reasons.map(function (r) { return r.Title; }).join(', ') || 'none';
+                    record('no-reason', 'no reason contains "' + m.reason + '" (have: ' + names + ')');
+                    return;
+                }
+                let minutes = Number(m.minutes) || 30;
+                if (minutes > info.max) minutes = info.max;
+                adDisarmSite(gid, minutes, reason.DisarmReasonID).then(function (res) {
+                    if (res.ok) record('disarmed', 'reason: ' + reason.Title);
+                    else record('failed', res.raw);
+                }, function (e) { record('failed', String(e && e.message || e)); });
+            }, function (e) { record('failed', 'reasons lookup failed: ' + String(e && e.message || e)); });
+        };
+
+        // Sent by the "If within 30 mins" button (3.14): disarm only a site
+        // that is armed right now, so a longer disarm already running is never
+        // cut short. The state comes from a fresh copy of Immix's own site list.
+        if (!m.requireArmed) { go(); return; }
+        adArmedNow(gid).then(function (armed) {
+            if (armed === false) record('skipped-disarmed', 'the site was already disarmed');
+            else if (armed !== true) record('state-unknown', 'could not read whether the site is armed');
+            else go();
+        }, function () { record('state-unknown', 'could not read whether the site is armed'); });
+    }
+
+    // Immix's site list refreshed through the page's own getSitesList, which
+    // returns each site's armed state. Shared for 15 seconds, so a batch of
+    // assignments costs one refresh.
+    let adListAt = 0, adListP = null;
+    function adRefreshSiteList() {
+        if (adListP && Date.now() - adListAt < 15000) return adListP;
+        adListAt = Date.now();
+        adListP = new Promise(function (resolve) {
+            let done = false;
+            const fin = function (ok) { if (!done) { done = true; resolve(ok); } };
+            setTimeout(function () { fin(false); }, 10000);
+            try {
+                if (typeof W.getSitesList !== 'function') { fin(false); return; }
+                W.getSitesList(function () { fin(true); });
+            } catch (e) { fin(false); }
+        });
+        return adListP;
+    }
+    // true / false for armed / disarmed, or null when it can't be told.
+    function adArmedNow(gid) {
+        return adRefreshSiteList().then(function (fresh) {
+            if (!fresh) return null;
+            let list = null;
+            try { list = W.sitesList; } catch (e) {}
+            if (!Array.isArray(list)) return null;
+            const s = list.filter(function (x) { return String(x.groupid) === String(gid); })[0];
+            return s && typeof s.armed === 'boolean' ? s.armed : null;
+        });
     }
 
     // Handle the autodisarm part of a check-in reply.
@@ -1367,7 +1419,8 @@
         adWrite(AD_RESULTS_KEY, adRead(AD_RESULTS_KEY, []).filter(function (r) { return !(r.rid && adSentRids[r.rid]); }));
         Object.keys(adSentEvents).forEach(function (k) { delete adSentEvents[k]; });
         Object.keys(adSentRids).forEach(function (k) { delete adSentRids[k]; });
-        if (adata.manual && adata.manual.id) adRunManual(adata.manual);
+        if (Array.isArray(adata.manualList)) adata.manualList.forEach(function (m) { if (m && m.id) adRunManual(m); });
+        else if (adata.manual && adata.manual.id) adRunManual(adata.manual);
         if (adata.disarm && adata.disarm.groupId) {
             const instr = adata.disarm;
             const pend = adRead(AD_PENDING_KEY, []);
@@ -1385,6 +1438,218 @@
         if (!hot || Date.now() - (hot.at || 0) > 5 * 60000) return false;
         const ids = (hot.ids || []);
         return adFreshClosures().some(function (c) { return ids.indexOf(String(c.groupId)) !== -1; });
+    }
+
+    /* ==================================================================
+       Site arming schedules (3.14)
+
+       Site Details: Immix draws each day of a site's Arming Schedule as a
+       600px green strip (armed) with a red block for each disarm period,
+       placed by pixels only (25px an hour, so one pixel is 2.4 minutes).
+       This reads the blocks, snaps them to the nearest 15 minutes, joins
+       overlapping ones, drops empty ones, and banks the result for the next
+       check-in from Alarm Monitor. A schedule the Worker already has, word
+       for word, is not banked again.
+
+       Alarm Monitor: each check-in sends what was banked and gets back the
+       schedules changed since it last asked, kept here for everyone. When
+       the Armed Sites or Site Check list is open, each site gets today's
+       scheduled disarm time beside it, red when it is 30 minutes or less away.
+
+       Times are exactly as Immix shows them; Immix handles time zones.
+       days = 8 lists (Monday..Sunday, Holidays) of [start, end] minutes.
+    ================================================================== */
+
+    const SCHED_OUT_KEY   = 'immixAutoProcess:schedOut';     // read on Site Details, not yet saved
+    const SCHED_CACHE_KEY = 'immixAutoProcess:schedCache';   // everyone's saved schedules
+    const SCHED_OUT_MAX   = 50;
+    const SCHED_PER_CHECKIN = 20;
+    const SCHED_SOON_MIN  = 30;
+    const SCHED_DAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'holiday'];
+
+    function schedSnap(m) { return Math.min(1440, Math.max(0, Math.round(m / 15) * 15)); }
+    // Same rules as the Worker's schedMergeDay.
+    function schedMerge(list) {
+        const ws = list.filter(function (w) { return w[1] > w[0]; })
+                       .sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+        const out = [];
+        ws.forEach(function (w) {
+            const last = out[out.length - 1];
+            if (last && w[0] <= last[1]) last[1] = Math.max(last[1], w[1]);
+            else out.push([w[0], w[1]]);
+        });
+        return out;
+    }
+
+    // The schedule drawn on this Site Details page, or null if the page
+    // doesn't look the way it did when this was written.
+    function schedReadPage() {
+        const rows = document.querySelectorAll('#tabs-disarm tbody > tr');
+        if (rows.length < 8) return null;
+        const days = [];
+        for (let i = 0; i < 8; i++) {
+            const row = rows[i];
+            const name = (row.cells[0] && row.cells[0].textContent || '').trim().toLowerCase();
+            if (name.indexOf(SCHED_DAY_NAMES[i]) !== 0) return null;
+            const sec = row.querySelector('.DisarmSection');
+            if (!sec) return null;
+            let full = parseFloat(getComputedStyle(sec).width);
+            if (!(full > 100)) full = 600;
+            const perPx = 1440 / full;
+            const list = [];
+            row.querySelectorAll('.DisarmPeriod').forEach(function (b) {
+                const left = parseFloat(b.style.left), width = parseFloat(b.style.width);
+                if (!isFinite(left) || !isFinite(width) || width <= 0) return;
+                list.push([schedSnap(left * perPx), schedSnap((left + width) * perPx)]);
+            });
+            days.push(schedMerge(list));
+        }
+        return days;
+    }
+
+    function schedPageTitle() {
+        return String(document.title || '').replace(/^\s*site details\s*:\s*/i, '').trim().slice(0, 160) || null;
+    }
+
+    // Everyone's schedules, kept in this browser: { next:{t,g}, sites:{ gid: [title, daysText] } }.
+    let schedMem = null;
+    function schedCache() {
+        if (schedMem) return schedMem;
+        const c = adRead(SCHED_CACHE_KEY, null);
+        schedMem = (c && c.sites && typeof c.sites === 'object') ? c : { next: { t: 0, g: '' }, sites: {} };
+        if (!schedMem.next) schedMem.next = { t: 0, g: '' };
+        return schedMem;
+    }
+
+    function schedCapture() {
+        const q = new URLSearchParams(location.search);
+        const gid = String(q.get('groupid') || q.get('groupId') || q.get('GroupId') || '');
+        if (!/^\d{1,12}$/.test(gid)) return;
+        const days = schedReadPage();
+        if (!days) return;
+        const text = JSON.stringify(days);
+        const known = adRead(SCHED_CACHE_KEY, null);   // fresh from storage, not the in-memory copy
+        if (known && known.sites && known.sites[gid] && known.sites[gid][1] === text) return;
+        const out = adRead(SCHED_OUT_KEY, {});
+        if (out[gid] && JSON.stringify(out[gid].days) === text) return;
+        out[gid] = { groupId: gid, title: schedPageTitle(), days: days, at: Date.now() };
+        const keys = Object.keys(out).sort(function (a, b) { return out[b].at - out[a].at; });
+        keys.slice(SCHED_OUT_MAX).forEach(function (k) { delete out[k]; });
+        adWrite(SCHED_OUT_KEY, out);
+    }
+
+    // What rides on a check-in, and when each item was banked, so the reply
+    // clears only those not banked again since.
+    const schedSentAt = {};
+    function schedCheckinExtras() {
+        const out = adRead(SCHED_OUT_KEY, {});
+        const list = Object.keys(out).map(function (k) { return out[k]; })
+            .sort(function (a, b) { return a.at - b.at; }).slice(0, SCHED_PER_CHECKIN);
+        list.forEach(function (x) { schedSentAt[x.groupId] = x.at; });
+        const extra = { schedSince: schedCache().next };
+        if (list.length) extra.schedules = list.map(function (x) { return { groupId: x.groupId, title: x.title, days: x.days }; });
+        return extra;
+    }
+
+    // Returns true while there are more rows to fetch, so the caller checks
+    // in again soon instead of waiting the full interval.
+    function schedApplyReply(r) {
+        if (!r || typeof r !== 'object') return false;
+        if (Array.isArray(r.saved) && r.saved.length) {
+            const out = adRead(SCHED_OUT_KEY, {});
+            r.saved.forEach(function (gid) {
+                if (out[gid] && out[gid].at === schedSentAt[gid]) delete out[gid];
+                delete schedSentAt[gid];
+            });
+            adWrite(SCHED_OUT_KEY, out);
+        }
+        const c = schedCache();
+        if (Array.isArray(r.rows)) {
+            r.rows.forEach(function (row) {
+                if (Array.isArray(row) && row[0]) c.sites[String(row[0])] = [String(row[1] || ''), String(row[2] || '')];
+            });
+        }
+        if (r.next && typeof r.next === 'object') c.next = { t: Number(r.next.t) || 0, g: String(r.next.g || '') };
+        c.ver = (c.ver || 0) + (Array.isArray(r.rows) && r.rows.length ? 1 : 0);
+        try { localStorage.setItem(SCHED_CACHE_KEY, JSON.stringify(c)); } catch (e) {}
+        return !!r.more;
+    }
+
+    function schedFmt(m) {
+        m = ((m % 1440) + 1440) % 1440;
+        const h = Math.floor(m / 60), mm = m % 60;
+        return (h % 12 || 12) + ':' + (mm < 10 ? '0' : '') + mm + (h < 12 ? ' AM' : ' PM');
+    }
+    // Same as the Worker's schedStarts: a window that carries on from the day
+    // before is not a new disarm.
+    function schedStartsOn(days, dow) {
+        const today = days[dow] || [], prev = days[(dow + 6) % 7] || [];
+        const carried = prev.some(function (w) { return w[1] >= 1440; });
+        return today.filter(function (w) { return !(w[0] === 0 && carried); }).map(function (w) { return w[0]; });
+    }
+    const schedParsed = {};
+    function schedDays(text) {
+        if (!(text in schedParsed)) {
+            let d = null;
+            try { d = JSON.parse(text); } catch (e) {}
+            schedParsed[text] = Array.isArray(d) ? d : null;
+        }
+        return schedParsed[text];
+    }
+
+    function schedLabel(entry, now) {
+        const days = entry ? schedDays(entry[1]) : null;
+        if (!days) return { text: 'schedule not saved yet', cls: 'ap-unk' };
+        const dow = (now.getDay() + 6) % 7, min = now.getHours() * 60 + now.getMinutes();
+        const starts = schedStartsOn(days, dow);
+        if (!starts.length) return { text: 'No scheduled disarm today', cls: 'ap-none' };
+        const soon = starts.filter(function (s) { return s > min && s - min <= SCHED_SOON_MIN; })[0];
+        if (soon !== undefined) return { text: 'Scheduled disarm ' + schedFmt(soon) + ' \u00b7 in ' + (soon - min) + ' min', cls: 'ap-soon' };
+        return { text: 'Scheduled disarm ' + starts.map(schedFmt).join(', '), cls: 'ap-dis' };
+    }
+
+    function schedStyle() {
+        if (document.getElementById('ap-sched-style')) return;
+        const st = document.createElement('style');
+        st.id = 'ap-sched-style';
+        st.textContent =
+            '.ap-sched{display:inline-block;margin-left:8px;padding:0 7px;border-radius:9px;font-size:11px;' +
+            'line-height:16px;vertical-align:middle;white-space:nowrap;pointer-events:none}' +
+            '.ap-sched.ap-dis{background:#4d3b10;color:#ffd27a}' +
+            '.ap-sched.ap-soon{background:#6b1d1d;color:#ffb3b3}' +
+            '.ap-sched.ap-none,.ap-sched.ap-unk{color:#8f8f8f;padding:0 2px}';
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    // Runs every second; does nothing unless Armed Sites, Disarmed Sites or
+    // Site Check is open. Each site's label is redone only when the minute
+    // or the saved schedules change, or Immix redraws the list.
+    function schedDecorate() {
+        const box = document.getElementById('site-select');
+        if (!box || !box.offsetParent) return;
+        schedStyle();
+        const c = schedCache(), now = new Date();
+        const stamp = (c.ver || 0) + ':' + now.getDate() + ':' + (now.getHours() * 60 + now.getMinutes());
+        box.querySelectorAll('span.siteNode').forEach(function (sp) {
+            if (!sp.id || sp.getAttribute('data-ap-sched') === stamp) return;
+            sp.setAttribute('data-ap-sched', stamp);
+            let pill = sp.nextElementSibling;
+            if (!pill || !pill.classList.contains('ap-sched')) {
+                pill = document.createElement('span');
+                sp.parentNode.insertBefore(pill, sp.nextSibling);
+            }
+            const info = schedLabel(c.sites[sp.id], now);
+            pill.className = 'ap-sched ' + info.cls;
+            pill.textContent = info.text;
+        });
+    }
+
+    /* ==================================================================
+       Site Details - read the arming schedule, then get out of the way
+    ================================================================== */
+    if (/sitedetails\.aspx/i.test(location.pathname)) {
+        try { schedCapture(); } catch (e) { console.warn('[auto process] could not read the arming schedule:', e); }
+        return;
     }
 
     /* ==================================================================
@@ -2312,6 +2577,12 @@
     createPanel();
     hookProcessAlarm();
     startQueueFilter();   // does nothing unless a supervisor has set a filter
+    // Disarm times in the site lists. An error is reported once, not every second.
+    let schedWarned = false;
+    setInterval(function () {
+        try { schedDecorate(); }
+        catch (e) { if (!schedWarned) { schedWarned = true; console.warn('[auto process] site list disarm times:', e); } }
+    }, 1000);
     setInterval(tick, POLL_MS);
 
     // Check in once the page state exists, then on the schedule. The five
