@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Immix Alarm Monitor - Auto Process v_5
 // @namespace    smartviewplus.autoprocess
-// @version      3.14.0
+// @version      3.14.1
 // @description  Auto-process toggle with selectable speed (default/fast/slow), idle timer that resets when the queue empties, per-operator alarm stats (auto-reset at midnight), plus the 4K target goal, daily leaderboard places and star ranking from the Supervisor Dashboard, plus each site's scheduled disarm time in the Armed Sites and Site Check lists, for the Immix Alarm Monitor.
 // @author       you
 // @match        https://newapp.smartviewplus.com/AlarmMonitor.aspx*
@@ -30,7 +30,7 @@
     ------------------------------------------------------------------ */
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
-    const SCRIPT_VERSION = '3.14.0';
+    const SCRIPT_VERSION = '3.14.1';
 
     /* ------------------------------------------------------------------
        Settings
@@ -1597,15 +1597,51 @@
         return schedParsed[text];
     }
 
+    const SCHED_SHORT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+    // When a disarm window that ends at `end` on day `dow` rearms. A window
+    // running to midnight carries on into the next day's window that starts
+    // at midnight, so this follows it, for up to a week. Returns the minute,
+    // and the day only when it is not `dow`; null if it never rearms that week.
+    function schedRearm(days, dow, end) {
+        let d = dow, e = end;
+        for (let hops = 0; e >= 1440 && hops < 7; hops++) {
+            d = (d + 1) % 7;
+            const cont = (days[d] || []).filter(function (w) { return w[0] === 0; })[0];
+            if (!cont) return { min: 0, day: d };          // rearms at midnight
+            e = cont[1];
+        }
+        if (e >= 1440) return null;
+        return { min: e, day: d === dow ? null : d };
+    }
+    function schedRearmText(r, dow) {
+        if (!r) return 'no rearm this week';
+        let t = 'rearm ' + schedFmt(r.min);
+        if (r.day !== null) t += r.day === (dow + 1) % 7 ? ' tomorrow' : ' ' + SCHED_SHORT_DAYS[r.day];
+        return t;
+    }
+
+    // Today's scheduled disarms with their rearm times. A disarm carried
+    // over from yesterday shows only when it rearms.
     function schedLabel(entry, now) {
         const days = entry ? schedDays(entry[1]) : null;
         if (!days) return { text: 'schedule not saved yet', cls: 'ap-unk' };
         const dow = (now.getDay() + 6) % 7, min = now.getHours() * 60 + now.getMinutes();
-        const starts = schedStartsOn(days, dow);
-        if (!starts.length) return { text: 'No scheduled disarm today', cls: 'ap-none' };
-        const soon = starts.filter(function (s) { return s > min && s - min <= SCHED_SOON_MIN; })[0];
-        if (soon !== undefined) return { text: 'Scheduled disarm ' + schedFmt(soon) + ' \u00b7 in ' + (soon - min) + ' min', cls: 'ap-soon' };
-        return { text: 'Scheduled disarm ' + starts.map(schedFmt).join(', '), cls: 'ap-dis' };
+        const prev = days[(dow + 6) % 7] || [];
+        const carried = prev.some(function (w) { return w[1] >= 1440; });
+        const parts = [];
+        let soon = false;
+        (days[dow] || []).forEach(function (w) {
+            const rearm = schedRearmText(schedRearm(days, dow, w[1]), dow);
+            if (w[0] === 0 && carried) { parts.push(rearm.charAt(0).toUpperCase() + rearm.slice(1)); return; }
+            let t = 'disarm ' + schedFmt(w[0]);
+            if (w[0] > min && w[0] - min <= SCHED_SOON_MIN) { t += ' \u00b7 in ' + (w[0] - min) + ' min'; soon = true; }
+            parts.push(t + ' \u00b7 ' + rearm);
+        });
+        if (!parts.length) return { text: 'No scheduled disarm today', cls: 'ap-none' };
+        let text = parts.join(', ');
+        if (/^disarm/.test(text)) text = 'Scheduled ' + text;
+        return { text: text, cls: soon ? 'ap-soon' : 'ap-dis' };
     }
 
     function schedStyle() {
